@@ -14,8 +14,10 @@ shapes and produce a canonical clew dict on the way out.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import json
+from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from clew.core.models import Span, SpanStatus, SpanType
@@ -255,4 +257,96 @@ def from_otel(otel_span: Mapping[str, Any]) -> Span:
     )
 
 
-__all__ = ["from_otel", "to_otel"]
+# ---------------------------------------------------------------------------
+# NDJSON bulk transport
+# ---------------------------------------------------------------------------
+
+
+def export_ndjson(trace_id: str, spans: Iterable[Span]) -> str:
+    """Render a trace as one JSON object per line (NDJSON).
+
+    The output is a single string suitable for writing to a file or
+    piping into ``jq``. The format is:
+
+        {"_kind": "trace", "trace_id": "...", "span_count": 3}
+        {"_kind": "span", ...otel...}
+        {"_kind": "span", ...otel...}
+
+    The leading ``_kind: trace`` header is a clew extension: it lets
+    :func:`import_ndjson` recover the trace id even when the consumer
+    has already sharded spans by trace. Plain OTel consumers can
+    ignore the header (it lives at the dict level, not in attributes).
+    """
+    span_list = list(spans)
+    header: dict[str, Any] = {
+        "_kind": "trace",
+        "trace_id": trace_id,
+        "span_count": len(span_list),
+    }
+    lines = [json.dumps(header, sort_keys=True)]
+    for s in span_list:
+        d = to_otel(s)
+        d["_kind"] = "span"
+        lines.append(json.dumps(d, sort_keys=True))
+    return "\n".join(lines) + "\n"
+
+
+def import_ndjson(text: str) -> tuple[str, list[Span]]:
+    """Parse an NDJSON trace file back into ``(trace_id, [Span])``.
+
+    Accepts both clew's wrapped form (with a leading ``_kind: trace``
+    header) and the bare OTel form (one OTel span dict per line, all
+    sharing a ``trace_id``). Raises :class:`ValueError` on malformed
+    input.
+    """
+    trace_id: str | None = None
+    spans: list[Span] = []
+    for n, raw in enumerate(text.splitlines(), start=1):
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            obj = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"line {n} is not valid JSON: {exc}") from exc
+        if not isinstance(obj, Mapping):
+            raise ValueError(f"line {n} is not a JSON object")
+        kind = obj.get("_kind")
+        if kind == "trace":
+            tid = obj.get("trace_id")
+            if not isinstance(tid, str):
+                raise ValueError(f"line {n}: trace header is missing trace_id")
+            trace_id = tid
+            continue
+        if kind is not None and kind != "span":
+            raise ValueError(f"line {n}: unknown _kind {kind!r}")
+        span = from_otel(obj)
+        spans.append(span)
+        if trace_id is None:
+            # Bare OTel form: take the first span's trace_id.
+            trace_id = span.trace_id
+    if trace_id is None:
+        raise ValueError("no spans found in NDJSON input")
+    return trace_id, spans
+
+
+def write_ndjson(path: Path, trace_id: str, spans: Iterable[Span]) -> int:
+    """Write spans to ``path`` as NDJSON; returns the number written."""
+    text = export_ndjson(trace_id, spans)
+    path.write_text(text, encoding="utf-8")
+    return text.count("\n") - 1  # minus the header line
+
+
+def read_ndjson(path: Path) -> tuple[str, list[Span]]:
+    """Read spans from an NDJSON file; returns ``(trace_id, [Span])``."""
+    return import_ndjson(path.read_text(encoding="utf-8"))
+
+
+__all__ = [
+    "export_ndjson",
+    "from_otel",
+    "import_ndjson",
+    "read_ndjson",
+    "to_otel",
+    "write_ndjson",
+]

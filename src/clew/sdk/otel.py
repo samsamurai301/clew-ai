@@ -47,14 +47,16 @@ def from_otel_span(otel_dict: dict[str, Any]) -> Span:
     return from_otel(otel_dict)
 
 
-def instrument_openai(client: Any) -> None:
+def instrument_openai(client: Any, tracer: Any | None = None) -> None:
     """Monkey-patch an OpenAI client to emit clew spans on every call.
 
     Wraps ``client.chat.completions.create`` so each call writes a
     span to a fresh ``.clew`` in the current working directory. The
     original method is preserved on the instance as ``__wrapped__``.
 
-    No-op if the OpenAI library is not importable.
+    Pass ``tracer=`` to use an existing :class:`clew.sdk.Tracer`
+    instead of creating one. No-op if the OpenAI library is not
+    importable.
     """
     try:
         pass
@@ -71,7 +73,7 @@ def instrument_openai(client: Any) -> None:
 
         from clew.core.models import SpanType
         from clew.sdk.tracer import Tracer
-        t = Tracer(cwd=Path.cwd())
+        t = tracer if tracer is not None else Tracer(cwd=Path.cwd())
         with t.trace("openai.chat.completions.create", type=SpanType.LLM) as span:
             span.set_attribute("gen_ai.system", "openai")
             if "model" in kwargs:
@@ -93,14 +95,15 @@ def instrument_openai(client: Any) -> None:
             return response
 
     wrapped.__clew_wrapped__ = True  # type: ignore[attr-defined]
-    client.chat.completions.create = wrapped  # type: ignore[assignment]  # type: ignore[assignment]
+    client.chat.completions.create = wrapped  # type: ignore[assignment]
 
 
-def instrument_anthropic(client: Any) -> None:
+def instrument_anthropic(client: Any, tracer: Any | None = None) -> None:
     """Monkey-patch an Anthropic client to emit clew spans on every call.
 
-    Same shape as :func:`instrument_openai`. No-op if the anthropic
-    SDK is not importable.
+    Same shape as :func:`instrument_openai`. Pass ``tracer=`` to
+    share an existing tracer; otherwise one is created on the fly.
+    No-op if the anthropic SDK is not importable.
     """
     try:
         pass
@@ -117,7 +120,7 @@ def instrument_anthropic(client: Any) -> None:
 
         from clew.core.models import SpanType
         from clew.sdk.tracer import Tracer
-        t = Tracer(cwd=Path.cwd())
+        t = tracer if tracer is not None else Tracer(cwd=Path.cwd())
         with t.trace("anthropic.messages.create", type=SpanType.LLM) as span:
             span.set_attribute("gen_ai.system", "anthropic")
             if "model" in kwargs:

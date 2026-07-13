@@ -1,6 +1,6 @@
 [project]
 name = "clew"
-version = "0.1.0"
+version = "1.0.0"
 description = "Local-first, content-addressed, git-style debugger for AI agent reasoning traces."
 readme = "ARCHITECTURE.md"
 requires-python = ">=3.11,<3.14"
@@ -41,6 +41,7 @@ dependencies = [
     "httpx>=0.28",
     "opentelemetry-api>=1.30",
     "anyio>=4",
+    "cryptography>=43",
 ]
 
 [project.urls]
@@ -103,7 +104,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**/*.py" = ["B011", "F841", "RUF059", "E741", "RUF043", "B018"]  # asserts + pre-existing test vars are fine
+"tests/**/*.py" = ["B011", "F841", "RUF059", "E741", "RUF043", "B018", "N814"]  # asserts + pre-existing test vars are fine
 "src/clew/cli.py" = ["B008", "RUF059"]
 "src/clew/ui/tui.py" = ["RUF012"]  # textual BINDINGS is a class-level constant  # typer defaults; unused tuple fields; textual BINDINGS
 

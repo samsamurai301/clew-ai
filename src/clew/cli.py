@@ -23,10 +23,8 @@ Design notes
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import io
+import contextlib
 import json
-import tarfile
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -35,9 +33,22 @@ import typer
 from rich.console import Console
 
 from clew.core.branch import BranchManager
+from clew.core.bundle import (
+    build_bundle,
+    extract_spans,
+    generate_keypair,
+    load_private_key,
+    load_public_key,
+    verify_bundle,
+)
 from clew.core.diff import diff as diff_traces
 from clew.core.diff import format_json as diff_format_json
+from clew.core.format import read_ndjson, write_ndjson
+from clew.core.health import check_store, gc
+from clew.core.models import SpanStatus, SpanType
+from clew.core.query import QueryFilter, parse_metadata_spec, query
 from clew.core.replay import MockExecutor, ReplayEngine
+from clew.core.runner import run_and_record
 from clew.core.store import Store
 from clew.core.trace import TraceStore
 from clew.ui.render import render_diff, render_log, render_span_tree
@@ -71,6 +82,55 @@ def _open_store(root: Path) -> tuple[Store, TraceStore]:
     if not (root / "manifest.json").exists():
         _err(f"no clew store at {root}. run `clew init` first.")
     return Store(root), TraceStore(Store(root))
+
+
+# ---------------------------------------------------------------------------
+# trace (subprocess recorder)
+# ---------------------------------------------------------------------------
+
+
+@app.command("trace")
+def cmd_trace(
+    argv: list[str] = typer.Argument(
+        ...,
+        help="Command to run, e.g. `clew trace -- python my_agent.py`. "
+        "Everything after `--` is the command.",
+    ),
+    name: str | None = typer.Option(
+        None,
+        "--name",
+        help="Span name. Default: basename of argv[0].",
+    ),
+    timeout: float | None = typer.Option(
+        None,
+        "--timeout",
+        help="Max seconds to wait before killing the process.",
+    ),
+    root: Path = typer.Option(None, "--root", help="Path to the .clew directory."),
+) -> None:
+    """Run a subprocess and record it as a single span.
+
+    Useful for one-off agents that don't import clew. The command
+    itself runs from the current working directory (not the .clew
+    dir); use ``cd`` in the shell if you need to change dirs.
+
+    Example:
+
+        clew trace -- python my_agent.py
+    """
+    if not argv:
+        _err("`clew trace` requires a command after `--`")
+        return
+    clew_path = _resolve_root(root)
+    store = Store(clew_path)
+    span = run_and_record(
+        argv,
+        cwd=Path.cwd(),
+        store=store,
+        name=name,
+        timeout_s=timeout,
+    )
+    typer.echo(span.id)
 
 
 # ---------------------------------------------------------------------------
@@ -303,8 +363,38 @@ def cmd_diff(
 
 
 # ---------------------------------------------------------------------------
-# share
+# share / verify / import  (signed bundles)
 # ---------------------------------------------------------------------------
+
+
+@app.command("keygen")
+def cmd_keygen(
+    out: Path = typer.Option(
+        Path("clew-key.pem"), "--out", help="Output path for the private key (PEM)."
+    ),
+    public_out: Path | None = typer.Option(
+        None,
+        "--public-out",
+        help="Output path for the public key (PEM). Default: <out>.pub",
+    ),
+) -> None:
+    """Generate a fresh Ed25519 keypair for signing bundles.
+
+    The private key is written UNENCRYPTED. Treat it like a password:
+    put it in your password manager, never commit it. The public key
+    is what you share with verifiers.
+    """
+    priv_pem, pub_pem = generate_keypair()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_bytes(priv_pem)
+    with contextlib.suppress(OSError):
+        out.chmod(0o600)
+    pub_path = public_out or out.with_suffix(out.suffix + ".pub")
+    pub_path.write_bytes(pub_pem)
+    with contextlib.suppress(OSError):
+        pub_path.chmod(0o644)
+    typer.echo(f"private key: {out}  (keep this secret)")
+    typer.echo(f"public  key: {pub_path}")
 
 
 @app.command("share")
@@ -313,44 +403,388 @@ def cmd_share(
     out: Path = typer.Option(
         None, "--out", help="Output path. Default: <trace_id>.clew.tgz in cwd."
     ),
+    key: Path = typer.Option(
+        ..., "--key", help="Ed25519 private key (PEM) to sign with."
+    ),
     root: Path = typer.Option(None, "--root", help="Path to the .clew directory."),
 ) -> None:
-    """Export a portable signed bundle (tar.gz) for sharing."""
+    """Export a portable signed bundle (tar.gz) for sharing.
+
+    The bundle is signed with Ed25519 over the manifest. Anyone with
+    the matching public key can verify it has not been tampered with
+    in transit. Bundle layout:
+
+        manifest.json   bundle metadata + content hash
+        sig             64-byte Ed25519 signature
+        spans/<id>.json one JSON-Lines file per span
+    """
     clew_path = _resolve_root(root)
     output = out or (Path.cwd() / f"{trace_id}.clew.tgz")
-    # Build a manifest.
-    manifest = {
-        "format": "clew-bundle",
-        "version": 1,
-        "created_at": datetime.now(UTC).isoformat(),
-        "trace_id": trace_id,
-        "source_store": str(clew_path),
-    }
-    # Hash the spans for a content signature.
     store, ts = _open_store(clew_path)
     try:
         trace = ts.get_trace(trace_id)
     except KeyError:
         _err(f"trace {trace_id!r} not found")
         return
-    h = hashlib.sha256()
-    for s in trace.spans:
-        h.update(s.model_dump_json().encode("utf-8"))
-    manifest["sha256"] = h.hexdigest()
-    # Write the tarball.
-    with tarfile.open(output, "w:gz") as tar:
-        # Add the manifest.
-        manifest_bytes = json.dumps(manifest, indent=2, sort_keys=True).encode("utf-8")
-        info = tarfile.TarInfo(name="manifest.json")
-        info.size = len(manifest_bytes)
-        info.mtime = int(datetime.now(UTC).timestamp())
-        tar.addfile(info, io.BytesIO(manifest_bytes))
-        # Add all span files for this trace.
-        for s in trace.spans:
-            shard = store._span_path(s.id)
-            if shard.exists():
-                tar.add(shard, arcname=f"spans/{shard.relative_to(clew_path / 'spans')}")
-    typer.echo(str(output))
+    priv = load_private_key(key)
+    pub = priv.public_key()
+    result = build_bundle(
+        trace,
+        trace.spans,
+        out=output,
+        source_store=clew_path,
+        private_key=priv,
+        public_key=pub,
+    )
+    typer.echo(str(result.path))
+
+
+@app.command("verify")
+def cmd_verify(
+    bundle: Path = typer.Argument(..., help="Path to the .clew.tgz bundle."),
+    public_key: Path = typer.Option(
+        ..., "--public-key", help="Path to the signer's Ed25519 public key (PEM)."
+    ),
+) -> None:
+    """Verify a signed bundle. Exits 0 on success, 1 on tamper or format error."""
+    pub = load_public_key(public_key)
+    v = verify_bundle(bundle, pub)
+    if not v.valid:
+        _err(f"bundle invalid: {v.reason}")
+        return
+    assert v.manifest is not None
+    typer.echo(
+        f"valid  trace_id={v.manifest['trace_id']}  "
+        f"spans={len(v.span_files)}  "
+        f"created_at={v.manifest['created_at']}"
+    )
+
+
+@app.command("import")
+def cmd_import(
+    bundle: Path = typer.Argument(..., help="Path to the .clew.tgz bundle."),
+    public_key: Path = typer.Option(
+        ..., "--public-key", help="Path to the signer's Ed25519 public key (PEM)."
+    ),
+    branch_name: str | None = typer.Option(
+        None,
+        "--branch",
+        help="Create a branch pointing at the imported root span. "
+        "Default: don't create a branch (spans are added to the store only).",
+    ),
+    root: Path = typer.Option(None, "--root", help="Path to the .clew directory."),
+) -> None:
+    """Verify and import a signed bundle into the local store.
+
+    Existing spans with the same id are left untouched (import is
+    idempotent). A branch is optionally created pointing at the
+    imported root span so you can `clew checkout` into it.
+    """
+    pub = load_public_key(public_key)
+    v = verify_bundle(bundle, pub)
+    if not v.valid:
+        _err(f"bundle invalid: {v.reason}")
+        return
+    assert v.manifest is not None
+    spans = extract_spans(bundle)
+    clew_path = _resolve_root(root)
+    store, ts = _open_store(clew_path)
+    added = 0
+    for s in spans.values():
+        try:
+            ts.add_span(s)
+            added += 1
+        except Exception as exc:
+            typer.echo(f"  warn: failed to import span {s.id}: {exc}", err=True)
+    if branch_name and v.manifest.get("root_span_id"):
+        bm = BranchManager(ts)
+        bm.create(branch_name, v.manifest["root_span_id"])
+    typer.echo(
+        f"imported {added}/{len(spans)} spans, "
+        f"trace_id={v.manifest['trace_id']}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# export / otel-import  (NDJSON)
+# ---------------------------------------------------------------------------
+
+
+@app.command("export")
+def cmd_export(
+    trace_id: str = typer.Argument(..., help="Trace id to export."),
+    out: Path = typer.Option(
+        None, "--out", help="Output path. Default: <trace_id>.clew.ndjson in cwd."
+    ),
+    root: Path = typer.Option(None, "--root", help="Path to the .clew directory."),
+) -> None:
+    """Export a trace to OTel-compatible NDJSON.
+
+    The output is one JSON object per line: a leading ``_kind:
+    trace`` header followed by every span rendered in OTel's
+    gen_ai.* shape. The file is round-trippable through ``clew
+    otel-import`` or any OTel collector that accepts NDJSON.
+    """
+    clew_path = _resolve_root(root)
+    store, ts = _open_store(clew_path)
+    try:
+        trace = ts.get_trace(trace_id)
+    except KeyError:
+        _err(f"trace {trace_id!r} not found")
+        return
+    output = out or (Path.cwd() / f"{trace_id}.clew.ndjson")
+    n = write_ndjson(output, trace.trace_id, trace.spans)
+    typer.echo(f"wrote {n} spans to {output}")
+
+
+@app.command("otel-import")
+def cmd_otel_import(
+    ndjson: Path = typer.Argument(..., help="Path to the .ndjson file."),
+    root: Path = typer.Option(None, "--root", help="Path to the .clew directory."),
+    branch_name: str | None = typer.Option(
+        None,
+        "--branch",
+        help="Create a branch pointing at the imported root span.",
+    ),
+) -> None:
+    """Import a trace from an OTel-compatible NDJSON file.
+
+    Existing spans with the same id are left untouched (idempotent).
+    A branch is optionally created so you can ``clew checkout`` into
+    the imported trace. The format expected is whatever ``clew
+    export`` produces, or a bare OTel NDJSON stream (one span dict
+    per line, all sharing a ``trace_id``).
+    """
+    clew_path = _resolve_root(root)
+    try:
+        trace_id, spans = read_ndjson(ndjson)
+    except (ValueError, OSError) as exc:
+        _err(f"failed to read {ndjson}: {exc}")
+        return
+    store, ts = _open_store(clew_path)
+    added = 0
+    for s in spans:
+        try:
+            ts.add_span(s)
+            added += 1
+        except Exception as exc:
+            typer.echo(f"  warn: failed to import span {s.id}: {exc}", err=True)
+    if branch_name and spans:
+        from clew.core.branch import BranchManager
+
+        BranchManager(ts).create(branch_name, spans[0].id)
+    typer.echo(f"imported {added}/{len(spans)} spans, trace_id={trace_id}")
+
+
+# ---------------------------------------------------------------------------
+# query
+# ---------------------------------------------------------------------------
+
+
+@app.command("query")
+def cmd_query(
+    name: str | None = typer.Option(
+        None, "--name", help="Substring match (case-insensitive) on span name."
+    ),
+    type: str | None = typer.Option(
+        None,
+        "--type",
+        help="Filter by span type (LLM, TOOL, DECISION, OBSERVATION).",
+    ),
+    status: str | None = typer.Option(
+        None,
+        "--status",
+        help="Filter by span status (OK, ERROR).",
+    ),
+    trace_id: str | None = typer.Option(
+        None, "--trace", help="Restrict to a single trace id."
+    ),
+    metadata: list[str] | None = typer.Option(
+        None,
+        "--metadata",
+        help="Match metadata key=value (repeatable, all keys must match).",
+    ),
+    limit: int = typer.Option(
+        50, "--limit", help="Maximum number of matches to return."
+    ),
+    root: Path = typer.Option(None, "--root", help="Path to the .clew directory."),
+    as_json: bool = typer.Option(False, "--json", help="Emit JSON instead of a table."),
+) -> None:
+    """Search spans across the store.
+
+    All filters are AND-combined. Examples:
+
+        clew query --name gpt-4o
+        clew query --type LLM --status ERROR
+        clew query --metadata model=gpt-4o --metadata temperature=0.7
+    """
+    clew_path = _resolve_root(root)
+    try:
+        type_enum = SpanType(type) if type else None
+    except ValueError:
+        _err(
+            f"unknown type {type!r}; expected one of {[t.value for t in SpanType]}"
+        )
+        return
+    try:
+        status_enum = SpanStatus(status) if status else None
+    except ValueError:
+        _err(
+            f"unknown status {status!r}; expected one of {[s.value for s in SpanStatus]}"
+        )
+        return
+    try:
+        meta = parse_metadata_spec(metadata or [])
+    except ValueError as exc:
+        _err(str(exc))
+        return
+    filt = QueryFilter(
+        name=name,
+        type=type_enum,
+        status=status_enum,
+        trace_id=trace_id,
+        metadata=meta or None,
+        limit=limit,
+    )
+    results = query(clew_path, filt)
+    if as_json:
+        typer.echo(
+            json.dumps(
+                {
+                    "count": len(results),
+                    "matches": [
+                        {
+                            "span_id": r.span.id,
+                            "trace_id": r.trace_id,
+                            "root_span_id": r.root_span_id,
+                            "type": r.span.type.value,
+                            "name": r.span.name,
+                            "status": r.span.status.value,
+                            "started_at": r.span.started_at.isoformat(),
+                            "ended_at": r.span.ended_at.isoformat(),
+                        }
+                        for r in results
+                    ],
+                },
+                indent=2,
+            )
+        )
+        return
+    if not results:
+        typer.echo("(no matches)")
+        return
+    from rich.table import Table
+
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("span", style="cyan", no_wrap=True)
+    table.add_column("type", style="magenta")
+    table.add_column("status")
+    table.add_column("name", style="bold")
+    table.add_column("trace", style="dim")
+    for r in results:
+        status_style = "green" if r.span.status == SpanStatus.OK else "red"
+        table.add_row(
+            r.span.id[:12],
+            r.span.type.value,
+            f"[{status_style}]{r.span.status.value}[/{status_style}]",
+            r.span.name,
+            r.trace_id[:12],
+        )
+    Console().print(table)
+
+
+# ---------------------------------------------------------------------------
+# doctor / gc
+# ---------------------------------------------------------------------------
+
+
+@app.command("doctor")
+def cmd_doctor(
+    root: Path = typer.Option(None, "--root", help="Path to the .clew directory."),
+    as_json: bool = typer.Option(False, "--json", help="Emit JSON instead of a panel."),
+) -> None:
+    """Check the store for corruption, missing refs, and orphan spans.
+
+    Read-only: the doctor never modifies your store. It exits 0 if
+    the store is healthy, 1 if any errors were found (warnings still
+    pass).
+    """
+    clew_path = _resolve_root(root)
+    r = check_store(clew_path)
+    if as_json:
+        typer.echo(
+            json.dumps(
+                {
+                    "healthy": r.healthy,
+                    "head": r.head,
+                    "branches": list(r.branches),
+                    "ref_count": r.ref_count,
+                    "span_files": r.span_files,
+                    "indexed_spans": r.indexed_spans,
+                    "errors": [i.to_dict() for i in r.errors],
+                    "warnings": [i.to_dict() for i in r.warnings],
+                },
+                indent=2,
+            )
+        )
+    else:
+        from rich.panel import Panel
+        from rich.table import Table
+
+        table = Table(show_header=True, header_style="bold")
+        table.add_column("severity", style="bold")
+        table.add_column("code")
+        table.add_column("message")
+        for i in r.errors:
+            table.add_row(
+                f"[red]{i.severity.value}[/red]", i.code, i.message
+            )
+        for i in r.warnings:
+            table.add_row(
+                f"[yellow]{i.severity.value}[/yellow]", i.code, i.message
+            )
+        if not r.issues:
+            table.add_row("[green]ok[/green]", "-", "no issues found")
+        summary = (
+            f"head: {r.head}  branches: {len(r.branches)}  "
+            f"spans: {r.span_files} files / {r.indexed_spans} indexed  "
+            f"refs: {r.ref_count}"
+        )
+        Console().print(Panel(table, title="clew doctor", subtitle=summary))
+    if not r.healthy:
+        raise typer.Exit(code=1)
+
+
+@app.command("gc")
+def cmd_gc(
+    root: Path = typer.Option(None, "--root", help="Path to the .clew directory."),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Report what would be deleted without actually removing anything.",
+    ),
+    as_json: bool = typer.Option(False, "--json", help="Emit JSON instead of a table."),
+) -> None:
+    """Remove span files that are no longer reachable from any branch.
+
+    A span is "orphan" iff no ref or ancestor chain leads to it. This
+    happens naturally when you delete a branch. By default ``clew gc``
+    is destructive; pass ``--dry-run`` to preview.
+    """
+    clew_path = _resolve_root(root)
+    r = gc(clew_path, dry_run=dry_run)
+    if as_json:
+        typer.echo(json.dumps(r.to_dict(), indent=2))
+    else:
+        action = "would delete" if dry_run else "deleted"
+        typer.echo(
+            f"scanned {r.scanned} spans, {action} {r.deleted}, kept {r.kept}"
+        )
+        if r.deleted_ids and not as_json:
+            sample = ", ".join(s[:12] for s in r.deleted_ids[:5])
+            if len(r.deleted_ids) > 5:
+                sample += f", … (+{len(r.deleted_ids) - 5} more)"
+            typer.echo(f"  {sample}")
 
 
 # ---------------------------------------------------------------------------

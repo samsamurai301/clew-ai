@@ -122,3 +122,99 @@ Launch the interactive textual TUI.
 ```
 
 Keybindings: `q` quit, `enter` expand, `b` branch, `r` replay, `d` diff.
+
+
+### `clew keygen [--out PATH] [--public-out PATH]`
+
+Generate a fresh Ed25519 keypair for signing bundles. The private key is written
+unencrypted (mode 0600) — store it securely. The public key defaults to `<out>.pub`.
+
+```bash
+clew keygen --out ~/.clew/key.pem
+# private key: /home/user/.clew/key.pem  (keep this secret)
+# public  key: /home/user/.clew/key.pem.pub
+```
+
+### `clew share <trace_id> --key PRIV [--out PATH]`
+
+Export a trace as a portable signed bundle (`*.clew.tgz`). The bundle contains
+a manifest, an Ed25519 signature, and one file per span.
+
+```bash
+clew share 0a1b2c... --key ~/.clew/key.pem --out trace.tgz
+```
+
+### `clew verify <bundle> --public-key PUB`
+
+Verify a signed bundle. Exits 0 on success, 1 on tamper or format error.
+
+```bash
+clew verify trace.tgz --public-key teammate-pub.pem
+# valid  trace_id=0a1b2c...  spans=4  created_at=2026-XX-XXT...
+```
+
+### `clew import <bundle> --public-key PUB [--branch NAME]`
+
+Verify and import a signed bundle. Optionally create a branch pointing at the
+imported root.
+
+```bash
+clew import trace.tgz --public-key teammate-pub.pem --branch shared
+```
+
+### `clew doctor [--json]`
+
+Check the store for manifest corruption, missing refs, dangling branches, and
+index/store divergence. Read-only. Exits 0 on healthy, 1 on errors.
+
+```bash
+clew doctor
+# ╭──── clew doctor ────╮
+# │ head: main  branches: 2  spans: 42  │
+# │ ok      -       no issues found      │
+# ╰─────────────────────────────────────╯
+```
+
+### `clew gc [--dry-run] [--json]`
+
+Remove span files that are no longer reachable from any branch. Use `--dry-run`
+to preview.
+
+```bash
+clew gc --dry-run
+# scanned 50 spans, would delete 3, kept 47
+```
+
+### `clew query [--name SUBSTR] [--type TYPE] [--status STATUS] [--trace ID] [--metadata k=v] [--limit N]`
+
+Search spans by any combination of filters. The `--json` form is pipeable.
+
+```bash
+clew query --type LLM --status ERROR
+clew query --name gpt-4o --metadata model=gpt-4o
+```
+
+### `clew export <trace_id> [--out PATH]`
+
+Write a trace to OTel-compatible NDJSON.
+
+```bash
+clew export 0a1b2c... --out trace.ndjson
+```
+
+### `clew otel-import <ndjson> [--branch NAME]`
+
+Read OTel NDJSON into the local store. Accepts both clew's wrapped form and
+bare OTel streams.
+
+```bash
+clew otel-import trace.ndjson --branch from-collector
+```
+
+### `clew trace -- <cmd> [--name NAME] [--timeout SECONDS]`
+
+Run a subprocess and record it as a single span.
+
+```bash
+clew trace --name my-agent -- python my_agent.py
+```

@@ -30,7 +30,8 @@ from __future__ import annotations
 
 import asyncio
 import functools
-from collections.abc import Callable
+import inspect
+from collections.abc import AsyncIterator, Callable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, ParamSpec, TypeVar
@@ -96,27 +97,23 @@ class Tracer:
 
             @functools.wraps(fn)
             async def async_agent(*args: P.args, **kwargs: P.kwargs) -> R:
-                return await self._run_as_agent(fn, args, kwargs, is_async=True)
+                return await self._run_async_agent(fn, args, kwargs)
 
             return async_agent  # type: ignore[return-value]
 
         @functools.wraps(fn)
         def sync_agent(*args: P.args, **kwargs: P.kwargs) -> R:
-            return self._run_as_agent(fn, args, kwargs, is_async=False)  # type: ignore[return-value]
+            return self._run_sync_agent(fn, args, kwargs)  # type: ignore[return-value]
 
         return sync_agent
 
-    def _run_as_agent(
+    def _run_sync_agent(
         self,
         fn: Callable[..., Any],
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
-        is_async: bool,
     ) -> Any:
-        """Common driver behind ``@agent`` for sync and async callables."""
-        # The agent creates a fresh trace_id. We use a random one
-        # (not content-hashed) so two unrelated runs don't accidentally
-        # share a trace id.
+        """Sync path for ``@agent``."""
         import uuid as _uuid
         trace_id = _uuid.uuid4().hex
         span = self._make_span(
@@ -128,11 +125,36 @@ class Tracer:
         )
         token = set_current_span(span)
         try:
-            result = fn(*args, **kwargs) if not is_async else None
-            if is_async:
-                # This branch is for the awaitable: handled by the
-                # async wrapper which awaits the coroutine.
-                return result
+            result = fn(*args, **kwargs)
+            span = self._finalize_span(span, result, error=None)
+            self._store.add_span(span)
+            return result
+        except Exception as exc:
+            err_span = self._finalize_span(span, None, error=exc)
+            self._store.add_span(err_span)
+            raise
+        finally:
+            reset_current_span(token)
+
+    async def _run_async_agent(
+        self,
+        fn: Callable[..., Any],
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+    ) -> Any:
+        """Async path for ``@agent``."""
+        import uuid as _uuid
+        trace_id = _uuid.uuid4().hex
+        span = self._make_span(
+            trace_id=trace_id,
+            parent_ids=[],
+            name=fn.__name__,
+            type=SpanType.OBSERVATION,
+            input={"args": list(args), "kwargs": kwargs},
+        )
+        token = set_current_span(span)
+        try:
+            result = await fn(*args, **kwargs)
             span = self._finalize_span(span, result, error=None)
             self._store.add_span(span)
             return result
@@ -159,6 +181,31 @@ class Tracer:
         """
         def decorator(fn: Callable[P, R]) -> Callable[P, R]:
             span_name = name or fn.__name__
+
+            if inspect.isasyncgenfunction(fn):
+
+                @functools.wraps(fn)
+                async def async_gen_wrapped(
+                    *args: P.args, **kwargs: P.kwargs
+                ) -> AsyncIterator[Any]:
+                    async for item in self._run_async_gen_span(
+                        fn, args, kwargs, span_name, type
+                    ):
+                        yield item
+
+                return async_gen_wrapped  # type: ignore[no-any-return, return-value]
+
+            if inspect.isgeneratorfunction(fn):
+
+                @functools.wraps(fn)
+                def sync_gen_wrapped(
+                    *args: P.args, **kwargs: P.kwargs
+                ) -> Iterator[Any]:
+                    yield from self._run_sync_gen_span(
+                        fn, args, kwargs, span_name, type
+                    )
+
+                return sync_gen_wrapped  # type: ignore[no-any-return, return-value]
 
             if asyncio.iscoroutinefunction(fn):
 
@@ -251,6 +298,119 @@ class Tracer:
             span = self._finalize_span(span, result, error=None)
             self._store.add_span(span)
             return result
+        except Exception as exc:
+            err_span = self._finalize_span(span, None, error=exc)
+            self._store.add_span(err_span)
+            raise
+        finally:
+            reset_current_span(token)
+
+    def _run_sync_gen_span(
+        self,
+        fn: Callable[..., Any],
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        span_name: str,
+        span_type: SpanType,
+    ) -> Iterator[Any]:
+        """Wrap a sync generator function: span lifetime = full iteration.
+
+        The span starts when the consumer begins iterating and ends
+        when the generator is exhausted (or raises). Each yielded
+        item is captured as a child OBSERVATION span so streaming
+        output is fully traced.
+        """
+        parent = current_span()
+        if parent is not None:
+            trace_id = parent.trace_id
+            parent_ids: list[str] = [parent.id]
+        else:
+            import uuid as _uuid
+            trace_id = _uuid.uuid4().hex
+            parent_ids = []
+        span = self._make_span(
+            trace_id=trace_id,
+            parent_ids=parent_ids,
+            name=span_name,
+            type=span_type,
+            input={"args": list(args), "kwargs": kwargs},
+        )
+        token = set_current_span(span)
+        items: list[Any] = []
+        try:
+            for i, item in enumerate(fn(*args, **kwargs)):
+                items.append(item)
+                # Per-item child span.
+                child = self._make_span(
+                    trace_id=trace_id,
+                    parent_ids=[span.id],
+                    name=f"{span_name}.item-{i}",
+                    type=SpanType.OBSERVATION,
+                    input={"index": i},
+                )
+                child_token = set_current_span(child)
+                try:
+                    child = self._finalize_span(child, item, error=None)
+                    self._store.add_span(child)
+                finally:
+                    reset_current_span(child_token)
+                yield item
+            span = self._finalize_span(span, items, error=None)
+            self._store.add_span(span)
+        except Exception as exc:
+            err_span = self._finalize_span(span, None, error=exc)
+            self._store.add_span(err_span)
+            raise
+        finally:
+            reset_current_span(token)
+
+    async def _run_async_gen_span(
+        self,
+        fn: Callable[..., Any],
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        span_name: str,
+        span_type: SpanType,
+    ) -> AsyncIterator[Any]:
+        """Wrap an async generator function: span lifetime = full iteration."""
+        parent = current_span()
+        if parent is not None:
+            trace_id = parent.trace_id
+            parent_ids: list[str] = [parent.id]
+        else:
+            import uuid as _uuid
+            trace_id = _uuid.uuid4().hex
+            parent_ids = []
+        span = self._make_span(
+            trace_id=trace_id,
+            parent_ids=parent_ids,
+            name=span_name,
+            type=span_type,
+            input={"args": list(args), "kwargs": kwargs},
+        )
+        token = set_current_span(span)
+        items: list[Any] = []
+        try:
+            i = 0
+            async for item in fn(*args, **kwargs):
+                items.append(item)
+                child = self._make_span(
+                    trace_id=trace_id,
+                    parent_ids=[span.id],
+                    name=f"{span_name}.item-{i}",
+                    type=SpanType.OBSERVATION,
+                    input={"index": i},
+                )
+                child_token = set_current_span(child)
+                try:
+                    child = self._finalize_span(child, item, error=None)
+                    self._store.add_span(child)
+                finally:
+                    reset_current_span(child_token)
+                yield item
+                i += 1
+            span = self._finalize_span(span, items, error=None)
+            self._store.add_span(span)
         except Exception as exc:
             err_span = self._finalize_span(span, None, error=exc)
             self._store.add_span(err_span)

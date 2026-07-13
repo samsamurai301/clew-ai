@@ -99,17 +99,32 @@ def test_replay_and_diff_e2e(tmp_path: Path) -> None:
 
 
 def test_share_e2e(tmp_path: Path) -> None:
-    """Share produces a valid tarball."""
+    """Share produces a valid signed tarball."""
+
     _run_clew("init", cwd=tmp_path)
     trace_id = _seed_trace(tmp_path)
     out = tmp_path / "out.tgz"
-    proc = _run_clew("share", trace_id, "--out", str(out), cwd=tmp_path)
+    # Generate a key for signing.
+    from clew.core.bundle import generate_keypair
+    priv_pem, _ = generate_keypair()
+    key = tmp_path / "key.pem"
+    key.write_bytes(priv_pem)
+    proc = _run_clew(
+        "share",
+        trace_id,
+        "--out",
+        str(out),
+        "--key",
+        str(key),
+        cwd=tmp_path,
+    )
     assert proc.returncode == 0, proc.stderr
     assert out.exists()
     import tarfile
     with tarfile.open(out, "r:gz") as tar:
         names = tar.getnames()
     assert "manifest.json" in names
+    assert "sig" in names
 
 
 def test_version_e2e() -> None:

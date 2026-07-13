@@ -102,9 +102,16 @@ class Store:
 
     def _ensure_head(self) -> None:
         head_path = self.root / "HEAD"
-        if head_path.exists():
-            return
-        head_path.write_text("main\n", encoding="utf-8")
+        if not head_path.exists():
+            head_path.write_text("main\n", encoding="utf-8")
+        # Also ensure a default branch ref exists so the store is
+        # immediately consistent for clew doctor. The placeholder id
+        # (64 zeros) is invalid and would be caught by ref-target
+        # checks; it's overwritten the first time the user moves
+        # main onto a real span.
+        default_ref = self._refs_dir / "main"
+        if not default_ref.exists():
+            default_ref.write_text("0" * 64 + "\n", encoding="utf-8")
 
     def _ensure_index(self) -> None:
         if self._db_path.exists():

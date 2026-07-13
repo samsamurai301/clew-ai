@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import anyio
 import pytest
 
 from clew.core.models import SpanStatus, SpanType
+from clew.core.store import Store
+from clew.core.trace import TraceStore
 from clew.sdk import Tracer
 
 
@@ -138,3 +141,106 @@ def test_lazy_store_creation(tmp_path: Path) -> None:
     with t.trace("hello") as span:
         span.set_output("world")
     assert (cwd / ".clew").exists()
+
+
+# ---------------------------------------------------------------------------
+# Generator / async generator support
+# ---------------------------------------------------------------------------
+
+
+def test_sync_generator_span_captures_each_yield(tmp_path: Path) -> None:
+    """A sync generator is wrapped: parent span + per-item child spans."""
+    t = Tracer(cwd=tmp_path)
+
+    @t.agent
+    def run():
+        gen = stream()
+        return list(gen)
+
+    @t.span("stream")
+    def stream():
+        for i in range(3):
+            yield i * 10
+
+    run()
+    ts = TraceStore(Store(tmp_path / ".clew"))
+    spans = list(ts.store.iter_spans())
+    names = {s.name for s in spans}
+    assert "run" in names
+    assert "stream" in names
+    item_names = {n for n in names if n.startswith("stream.item-")}
+    assert item_names == {"stream.item-0", "stream.item-1", "stream.item-2"}
+    # The parent span's output is the list of items.
+    parent = next(s for s in spans if s.name == "stream")
+    assert parent.output == [0, 10, 20]
+
+
+def test_sync_generator_span_records_error(tmp_path: Path) -> None:
+    """A generator that raises mid-iteration records the error."""
+    t = Tracer(cwd=tmp_path)
+
+    @t.agent
+    def run():
+        return list(broken())
+
+    @t.span("broken")
+    def broken():
+        yield 1
+        raise RuntimeError("kapow")
+
+    with pytest.raises(RuntimeError, match="kapow"):
+        run()
+    ts = TraceStore(Store(tmp_path / ".clew"))
+    spans = list(ts.store.iter_spans())
+    parent = next(s for s in spans if s.name == "broken")
+    assert parent.status == SpanStatus.ERROR
+    assert "kapow" in (parent.error or "")
+
+
+def test_async_generator_span_captures_each_yield(tmp_path: Path) -> None:
+    """An async generator is wrapped with the same parent + child layout."""
+    t = Tracer(cwd=tmp_path)
+
+    @t.agent
+    async def run():
+        out = []
+        async for x in astream():
+            out.append(x)
+        return out
+
+    @t.span("astream")
+    async def astream():
+        for i in range(2):
+            yield i * 100
+
+    asyncio.run(run())
+    ts = TraceStore(Store(tmp_path / ".clew"))
+    spans = list(ts.store.iter_spans())
+    names = {s.name for s in spans}
+    assert "astream" in names
+    assert "astream.item-0" in names
+    assert "astream.item-1" in names
+
+
+def test_async_generator_span_records_error(tmp_path: Path) -> None:
+    t = Tracer(cwd=tmp_path)
+
+    @t.agent
+    async def run():
+        out = []
+        async for x in broken():
+            out.append(x)
+        return out
+
+    @t.span("broken")
+    async def broken():
+        yield 1
+        raise ValueError("nope")
+
+    with pytest.raises(ValueError, match="nope"):
+        asyncio.run(run())
+    ts = TraceStore(Store(tmp_path / ".clew"))
+    spans = list(ts.store.iter_spans())
+    parent = next(s for s in spans if s.name == "broken")
+    assert parent.status == SpanStatus.ERROR
+    assert "nope" in (parent.error or "")

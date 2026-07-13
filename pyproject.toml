@@ -1,8 +1,8 @@
 [project]
 name = "clew"
-version = "1.0.0"
+version = "1.1.0"
 description = "Local-first, content-addressed, git-style debugger for AI agent reasoning traces."
-readme = "ARCHITECTURE.md"
+readme = "README.md"
 requires-python = ">=3.11,<3.14"
 license = { text = "MIT" }
 authors = [
@@ -46,7 +46,7 @@ dependencies = [
 
 [project.urls]
 Homepage = "https://github.com/clew/clew"
-Documentation = "https://github.com/clew/clew/blob/main/ARCHITECTURE.md"
+Documentation = "https://clew.dev"
 Repository = "https://github.com/clew/clew"
 Issues = "https://github.com/clew/clew/issues"
 
@@ -58,8 +58,17 @@ clew = "clew.cli:app"
 # my-plugin = "my_plugin:Plugin"
 
 # PEP 735 dependency groups — uv's native dev-deps format
+[project.optional-dependencies]
+mcp = ["mcp>=1.0"]
+all = ["mcp>=1.0"]
+
 [dependency-groups]
+docs = ["mkdocs>=1.6", "mkdocs-material>=9.5"]
+
 dev = [
+    "mcp>=1.0",
+    "mkdocs>=1.6",
+    "mkdocs-material>=9.5",
     "pytest>=8",
     "pytest-asyncio>=0.24",
     "pytest-cov>=6",
@@ -126,6 +135,10 @@ warn_return_any = true
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
+module = "clew.cli"
+disable_error_code = ["unreachable"]
+
+[[tool.mypy.overrides]]
 module = ["textual.*", "rich.*"]
 ignore_missing_imports = true
 
@@ -168,5 +181,9 @@ exclude_lines = [
 ]
 
 [[tool.mypy.overrides]]
-module = ["clew.ui.tui", "clew.sdk.tracer", "clew.ui.render", "clew.sdk.otel"]
+module = "clew.cli"
+disable_error_code = ["unreachable"]
+
+[[tool.mypy.overrides]]
+module = ["clew.ui.tui", "clew.sdk.tracer", "clew.ui.render", "clew.sdk.otel", "clew.mcp_server"]
 ignore_errors = true

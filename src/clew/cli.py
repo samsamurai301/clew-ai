@@ -27,7 +27,7 @@ import contextlib
 import json
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 import typer
 from rich.console import Console
@@ -45,6 +45,7 @@ from clew.core.diff import diff as diff_traces
 from clew.core.diff import format_json as diff_format_json
 from clew.core.format import read_ndjson, write_ndjson
 from clew.core.health import check_store, gc
+from clew.core.html_report import write_html
 from clew.core.models import SpanStatus, SpanType
 from clew.core.query import QueryFilter, parse_metadata_spec, query
 from clew.core.replay import MockExecutor, ReplayEngine
@@ -65,7 +66,7 @@ app = typer.Typer(
 _err_console = Console(stderr=True, style="red")
 
 
-def _err(msg: str) -> None:
+def _err(msg: str) -> NoReturn:
     """Print an error and exit 1."""
     _err_console.print(f"[red]error:[/red] {msg}")
     raise typer.Exit(code=1)
@@ -120,7 +121,6 @@ def cmd_trace(
     """
     if not argv:
         _err("`clew trace` requires a command after `--`")
-        return
     clew_path = _resolve_root(root)
     store = Store(clew_path)
     span = run_and_record(
@@ -214,14 +214,29 @@ def cmd_show(
     trace_id: str = typer.Argument(..., help="Trace id to show."),
     root: Path = typer.Option(None, "--root", help="Path to the .clew directory."),
     as_json: bool = typer.Option(False, "--json", help="Emit NDJSON instead of a tree."),
+    html: Path = typer.Option(
+        None,
+        "--html",
+        help="Write a self-contained interactive HTML report. "
+        "Default: <trace_id>.html in cwd.",
+    ),
 ) -> None:
-    """Show the span tree of a trace."""
+    """Show the span tree of a trace.
+
+    With ``--html <path>``, writes a self-contained HTML page
+    (dark theme, collapsible spans, ERROR highlights) suitable
+    for sharing via email or gist.
+    """
     store, ts = _open_store(_resolve_root(root))
     try:
         trace = ts.get_trace(trace_id)
     except KeyError:
         _err(f"trace {trace_id!r} not found")
-        return  # unreachable
+        raise  # mypy can't prove _err is NoReturn
+    if html is not None:
+        write_html(trace, html)
+        typer.echo(str(html))
+        return
     if as_json:
         for s in trace.spans:
             typer.echo(s.model_dump_json())
@@ -248,7 +263,6 @@ def cmd_branch(
         bm.create(name, head)
     except FileExistsError:
         _err(f"branch {name!r} already exists")
-        return
     typer.echo(f"Created branch {name!r} → {head[:12]}…")
 
 
@@ -297,7 +311,6 @@ def cmd_checkout(
         bm.checkout(name)
     except KeyError:
         _err(f"branch {name!r} not found")
-        return
     typer.echo(f"Switched to branch {name!r}")
 
 
@@ -321,7 +334,6 @@ def cmd_replay(
     ex = MockExecutor()
     if executor_kind not in {"mock", "recording"}:
         _err(f"unknown executor {executor_kind!r}")
-        return
     engine = ReplayEngine(ts, executor=ex)
 
     async def _run() -> str:
@@ -354,7 +366,6 @@ def cmd_diff(
         b = ts.get_trace(trace_b)
     except KeyError as exc:
         _err(f"trace {exc.args[0]!r} not found")
-        return
     d = diff_traces(a, b)
     if as_json:
         typer.echo(diff_format_json(d))
@@ -425,7 +436,6 @@ def cmd_share(
         trace = ts.get_trace(trace_id)
     except KeyError:
         _err(f"trace {trace_id!r} not found")
-        return
     priv = load_private_key(key)
     pub = priv.public_key()
     result = build_bundle(
@@ -451,7 +461,6 @@ def cmd_verify(
     v = verify_bundle(bundle, pub)
     if not v.valid:
         _err(f"bundle invalid: {v.reason}")
-        return
     assert v.manifest is not None
     typer.echo(
         f"valid  trace_id={v.manifest['trace_id']}  "
@@ -484,7 +493,6 @@ def cmd_import(
     v = verify_bundle(bundle, pub)
     if not v.valid:
         _err(f"bundle invalid: {v.reason}")
-        return
     assert v.manifest is not None
     spans = extract_spans(bundle)
     clew_path = _resolve_root(root)
@@ -531,7 +539,6 @@ def cmd_export(
         trace = ts.get_trace(trace_id)
     except KeyError:
         _err(f"trace {trace_id!r} not found")
-        return
     output = out or (Path.cwd() / f"{trace_id}.clew.ndjson")
     n = write_ndjson(output, trace.trace_id, trace.spans)
     typer.echo(f"wrote {n} spans to {output}")
@@ -560,7 +567,6 @@ def cmd_otel_import(
         trace_id, spans = read_ndjson(ndjson)
     except (ValueError, OSError) as exc:
         _err(f"failed to read {ndjson}: {exc}")
-        return
     store, ts = _open_store(clew_path)
     added = 0
     for s in spans:
@@ -625,19 +631,16 @@ def cmd_query(
         _err(
             f"unknown type {type!r}; expected one of {[t.value for t in SpanType]}"
         )
-        return
     try:
         status_enum = SpanStatus(status) if status else None
     except ValueError:
         _err(
             f"unknown status {status!r}; expected one of {[s.value for s in SpanStatus]}"
         )
-        return
     try:
         meta = parse_metadata_spec(metadata or [])
     except ValueError as exc:
         _err(str(exc))
-        return
     filt = QueryFilter(
         name=name,
         type=type_enum,
@@ -804,3 +807,26 @@ def cmd_tui(
         _err(f"no clew store at {clew_path}. run `clew init` first.")
     app_tui = TraceBrowserApp(clew_path)
     app_tui.run()
+
+
+# ---------------------------------------------------------------------------
+# mcp  (Model Context Protocol server)
+# ---------------------------------------------------------------------------
+
+
+@app.command("mcp")
+def cmd_mcp() -> None:
+    """Run the clew MCP server (stdio transport).
+
+    Connect from any MCP-compatible client — Claude Desktop,
+    Cursor, Cline, the MCP Inspector. See the README for
+    one-line config snippets.
+    """
+    try:
+        from clew.mcp_server import main as mcp_main
+    except ImportError as exc:
+        _err(
+            f"MCP support requires the `mcp` package: {exc}. "
+            "Install with `uv add 'clew[mcp]'`."
+        )
+    raise typer.Exit(code=mcp_main())

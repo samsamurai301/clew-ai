@@ -131,4 +131,4 @@ def test_version_e2e() -> None:
     """The version flag prints the package version."""
     proc = _run_clew("version")
     assert proc.returncode == 0
-    assert "0.1.0" in proc.stdout
+    assert "1.1" in proc.stdout

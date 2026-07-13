@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>clew trace e2bf0ed0fa754eba</title>
+<style>
+  :root {
+    --bg: #0d1117; --fg: #c9d1d9; --muted: #8b949e;
+    --accent: #58a6ff; --error: #f85149; --ok: #3fb950;
+    --border: #30363d; --row: #161b22;
+  }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+         background: var(--bg); color: var(--fg);
+         margin: 0; padding: 24px; line-height: 1.5; }
+  h1 { color: var(--accent); margin: 0 0 4px; font-size: 1.4em; }
+  h2 { margin-top: 32px; font-size: 1.1em; border-bottom: 1px solid var(--border);
+        padding-bottom: 4px; }
+  .meta { color: var(--muted); font-size: 0.9em; margin-bottom: 16px; }
+  .meta code { background: var(--row); padding: 2px 6px; border-radius: 3px; }
+  ul.tree, ul.tree ul { list-style: none; padding-left: 20px; }
+  ul.tree { padding-left: 0; }
+  .span { border: 1px solid var(--border); border-radius: 6px;
+           padding: 8px 12px; margin: 4px 0; background: var(--row); }
+  .span.error { border-color: var(--error); }
+  .span-head { display: flex; gap: 8px; align-items: center;
+                cursor: pointer; user-select: none; }
+  .caret { color: var(--muted); width: 1em; }
+  .name { font-weight: 600; }
+  .type { color: var(--muted); font-size: 0.85em;
+           background: var(--bg); padding: 1px 6px; border-radius: 3px; }
+  .status-ok { color: var(--ok); font-size: 0.85em; }
+  .status-error { color: var(--error); font-size: 0.85em; font-weight: 600; }
+  .id { color: var(--muted); font-size: 0.75em; font-family: monospace; }
+  .duration { color: var(--muted); font-size: 0.85em; margin-left: auto; }
+  .details { margin-top: 8px; padding: 8px 12px;
+              background: var(--bg); border-radius: 4px; display: none; }
+  .details.open { display: block; }
+  .details pre { overflow-x: auto; white-space: pre-wrap;
+                  word-wrap: break-word; max-width: 100%;
+                  font-size: 0.85em; margin: 4px 0; }
+  .label { color: var(--muted); font-size: 0.8em;
+            text-transform: uppercase; letter-spacing: 0.05em; }
+  .controls { margin: 16px 0; }
+  .controls button { background: var(--row); color: var(--fg);
+                     border: 1px solid var(--border); padding: 4px 10px;
+                     border-radius: 4px; cursor: pointer; margin-right: 8px; }
+  .controls button:hover { border-color: var(--accent); }
+</style>
+</head>
+<body>
+<h1>clew trace <span class="id">e2bf0ed0fa754eba</span></h1>
+<div class="meta">
+  root: <code>a9050352f2e74f27</code> · spans: <strong>5</strong> ·
+  errors: <strong>1</strong> · started: 2024-01-01T00:00:00+00:00
+</div>
+<div class="controls">
+  <button onclick="document.querySelectorAll('.details').forEach(e => e.classList.add('open'))">Expand all</button>
+  <button onclick="document.querySelectorAll('.details').forEach(e => e.classList.remove('open'))">Collapse all</button>
+</div>
+<ul class="tree">
+<li><div class="span">
+<div class="span-head"><span class="caret">▶</span><span class="name">research_agent</span><span class="type">OBSERVATION</span><span class="status-ok">OK</span><span class="duration">2000.0ms</span></div>
+<div class="details">
+<div class="label">id</div><div class="id">a9050352f2e74f27beb6803fa7fa636b</div>
+<div class="label">attributes</div><pre>{
+  &quot;question&quot;: &quot;what is clew?&quot;
+}</pre>
+<div class="label">input</div><pre>{
+  &quot;q&quot;: &quot;what is clew?&quot;
+}</pre>
+<div class="label">output</div><pre>clew is git for AI reasoning.</pre>
+</div></div>
+<ul>
+<li><div class="span">
+<div class="span-head"><span class="caret">▶</span><span class="name">plan</span><span class="type">LLM</span><span class="status-ok">OK</span><span class="duration">1000.0ms</span></div>
+<div class="details">
+<div class="label">id</div><div class="id">b7359ed66a22490085ae163d4c27e315</div>
+<div class="label">parent_ids</div><div class="id">a9050352f2e74f27beb6803fa7fa636b</div>
+<div class="label">attributes</div><pre>{
+  &quot;model&quot;: &quot;gpt-4o&quot;
+}</pre>
+<div class="label">input</div><pre>{
+  &quot;messages&quot;: [
+    {
+      &quot;content&quot;: &quot;plan: what is clew?&quot;,
+      &quot;role&quot;: &quot;user&quot;
+    }
+  ]
+}</pre>
+<div class="label">output</div><pre>1. Define clew
+2. Compare to git
+3. Summarize</pre>
+</div></div>
+<ul>
+<li><div class="span">
+<div class="span-head"><span class="caret">▶</span><span class="name">search</span><span class="type">TOOL</span><span class="status-ok">OK</span><span class="duration">1000.0ms</span></div>
+<div class="details">
+<div class="label">id</div><div class="id">85e29352777c4b248e42c37722066b7e</div>
+<div class="label">parent_ids</div><div class="id">b7359ed66a22490085ae163d4c27e315</div>
+<div class="label">attributes</div><pre>{
+  &quot;tool_name&quot;: &quot;web_search&quot;
+}</pre>
+<div class="label">input</div><pre>{
+  &quot;q&quot;: &quot;clew reasoning&quot;
+}</pre>
+<div class="label">output</div><pre>3 results</pre>
+</div></div>
+<ul>
+<li><div class="span error">
+<div class="span-head"><span class="caret">▶</span><span class="name">fetch</span><span class="type">TOOL</span><span class="status-error">ERROR</span><span class="duration">1000.0ms</span></div>
+<div class="details">
+<div class="label">id</div><div class="id">59af93b3605342b8b706f0948c192a17</div>
+<div class="label">parent_ids</div><div class="id">85e29352777c4b248e42c37722066b7e</div>
+<div class="label">error</div><pre>HTTP 503: upstream timeout</pre>
+<div class="label">attributes</div><pre>{
+  &quot;tool_name&quot;: &quot;http_get&quot;
+}</pre>
+<div class="label">input</div><pre>{
+  &quot;url&quot;: &quot;https://clew.dev&quot;
+}</pre>
+</div></div>
+</ul>
+<li><div class="span">
+<div class="span-head"><span class="caret">▶</span><span class="name">answer</span><span class="type">LLM</span><span class="status-ok">OK</span><span class="duration">2000.0ms</span></div>
+<div class="details">
+<div class="label">id</div><div class="id">fcf806e30eda4933bb0620193d142256</div>
+<div class="label">parent_ids</div><div class="id">b7359ed66a22490085ae163d4c27e315</div>
+<div class="label">attributes</div><pre>{
+  &quot;model&quot;: &quot;gpt-4o&quot;
+}</pre>
+<div class="label">input</div><pre>{
+  &quot;messages&quot;: [
+    {
+      &quot;content&quot;: &quot;synthesize&quot;,
+      &quot;role&quot;: &quot;user&quot;
+    }
+  ]
+}</pre>
+<div class="label">output</div><pre>Based on the plan and partial results, clew is...</pre>
+</div></div>
+</ul>
+</ul>
+</ul>
+<hr style="margin: 32px 0; border: none; border-top: 1px solid var(--border);">
+<p class="meta">
+  Generated by <a href="https://github.com/clew/clew" style="color: var(--accent);">clew</a> ·
+  <span class="id">2026-07-13T21:57:28.624008+00:00</span>
+</p>
+<script>
+document.querySelectorAll('.span-head').forEach(head => {
+  head.addEventListener('click', () => {
+    const d = head.nextElementSibling;
+    if (d && d.classList.contains('details')) {
+      d.classList.toggle('open');
+    }
+    const caret = head.querySelector('.caret');
+    if (caret) {
+      caret.textContent = d && d.classList.contains('open') ? '▼' : '▶';
+    }
+  });
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,116 @@
+site_name: clew
+site_description: git for AI reasoning — trace, branch, replay, and diff your agent runs locally.
+site_url: https://clew.dev
+repo_url: https://github.com/clew/clew
+repo_name: clew/clew
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: Switch to light mode
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.tabs
+    - navigation.sections
+    - navigation.indexes
+    - navigation.top
+    - search.highlight
+    - search.share
+    - search.suggest
+    - content.code.copy
+    - content.action.edit
+    - content.tabs.link
+  icon:
+    repo: fontawesome/brands/github
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - pymdownx.tilde
+  - pymdownx.caret
+  - pymdownx.keys
+  - pymdownx.mark
+  - pymdownx.smartsymbols
+
+plugins:
+  - search
+  - social
+  - git-revision-date-localized:
+      enable_creation_date: true
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/clew/clew
+    - icon: fontawesome/brands/python
+      link: https://pypi.org/project/clew
+
+nav:
+  - Home: index.md
+  - Getting started:
+      - Installation: getting-started/install.md
+      - Quickstart: getting-started/quickstart.md
+      - Tutorial: getting-started/tutorial.md
+  - User guide:
+      - The Tracer (Python SDK): user-guide/tracer.md
+      - The CLI: user-guide/cli.md
+      - Branching & replay: user-guide/branching.md
+      - Diffing traces: user-guide/diff.md
+      - Sharing (signed bundles): user-guide/sharing.md
+      - Querying: user-guide/query.md
+      - Doctor & GC: user-guide/doctor.md
+      - Exporting: user-guide/export.md
+  - Integrations:
+      - Model Context Protocol: integrations/mcp.md
+      - OpenTelemetry: integrations/otel.md
+      - OpenAI / Anthropic: integrations/llm-sdks.md
+      - LangChain: integrations/langchain.md
+  - Internals:
+      - Architecture: internals/architecture.md
+      - Content addressing: internals/content-addressing.md
+      - Replay engine: internals/replay.md
+      - Bundle format: internals/bundle-format.md
+  - Reference:
+      - CLI reference: reference/cli.md
+      - SDK reference: reference/sdk.md
+      - PROTOCOL: reference/protocol.md
+  - Community:
+      - FAQ: faq.md
+      - Contributing: contributing.md
+      - Migration: migration.md
+      - Changelog: changelog.md

@@ -1,0 +1,65 @@
+name: 'clew trace'
+description: 'Run a clew-traced step and upload the resulting trace as an artifact'
+author: 'clew authors'
+
+inputs:
+  python-version:
+    description: 'Python version to use'
+    required: false
+    default: '3.11'
+  working-directory:
+    description: 'Working directory for the command'
+    required: false
+    default: '.'
+  run:
+    description: 'Command to run (recorded as a single span)'
+    required: true
+  store-dir:
+    description: 'Where to put the .clew store'
+    required: false
+    default: '.clew'
+  artifact-name:
+    description: 'Artifact name for the uploaded trace'
+    required: false
+    default: 'clew-trace'
+  upload:
+    description: 'Whether to upload the trace as an artifact'
+    required: false
+    default: 'true'
+
+runs:
+  using: 'composite'
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+    - name: Install clew
+      shell: bash
+      run: pip install clew
+    - name: Run ${{ inputs.run }} under clew
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        mkdir -p "${{ inputs.store-dir }}"
+        cd "${{ inputs.working-directory }}"
+        clew trace --name "${{ inputs.run }}" -- "${{ inputs.run }}"
+    - name: Export trace to HTML
+      if: ${{ inputs.upload == 'true' }}
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        TID=$(clew log --json | jq -r '.[0].trace_id')
+        clew show "$TID" --html trace.html
+    - name: Upload trace
+      if: ${{ inputs.upload == 'true' }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: |
+          ${{ inputs.working-directory }}/.clew
+          ${{ inputs.working-directory }}/trace.html
+        if-no-files-found: warn
+
+branding:
+  icon: 'git-branch'
+  color: 'indigo'

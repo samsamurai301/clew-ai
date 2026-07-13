@@ -436,6 +436,78 @@ class Tracer:
         """
         return _TraceContext(self, name, type)
 
+    def _begin(
+        self,
+        name: str,
+        type: SpanType = SpanType.OBSERVATION,
+    ) -> Span:
+        """Open a span manually. Returns the in-flight :class:`Span`.
+
+        Pair with :meth:`_end` to close the span. The span is added
+        to the active context so child spans auto-parent onto it.
+        This is the API integrations like the LangChain callback
+        handler use to bridge non-context-manager event systems.
+        """
+        parent = current_span()
+        if parent is not None:
+            trace_id = parent.trace_id
+            parent_ids: list[str] = [parent.id]
+        else:
+            import uuid as _uuid
+
+            trace_id = _uuid.uuid4().hex
+            parent_ids = []
+        span = self._make_span(
+            trace_id=trace_id,
+            parent_ids=parent_ids,
+            name=name,
+            type=type,
+            input=None,
+        )
+        self._active_spans = getattr(self, "_active_spans", {})
+        self._active_tokens = getattr(self, "_active_tokens", {})
+        self._active_spans[span.id] = span
+        self._active_tokens[span.id] = set_current_span(span)
+        return span
+
+    def _end(
+        self,
+        span_id: str,
+        *,
+        output: Any = None,
+        error: BaseException | None = None,
+    ) -> None:
+        """Close a span opened by :meth:`_begin`."""
+        spans = getattr(self, "_active_spans", {})
+        tokens = getattr(self, "_active_tokens", {})
+        span = spans.pop(span_id, None)
+        token = tokens.pop(span_id, None)
+        if span is None:
+            return
+        now = datetime.now(UTC)
+        new_attrs = dict(span.attributes)
+        new_status = SpanStatus.OK
+        new_error: str | None = None
+        if error is not None:
+            new_status = SpanStatus.ERROR
+            new_attrs["error.type"] = type(error).__name__
+            new_attrs["error.message"] = str(error)
+            new_error = f"{type(error).__name__}: {error}"
+        finalized = span.model_copy(
+            update={
+                "ended_at": now,
+                "status": new_status,
+                "output": output,
+                "attributes": new_attrs,
+                "error": new_error,
+            }
+        )
+        self.store.add_span(finalized)
+        tokens = getattr(self, "_active_tokens", {})
+        token = tokens.pop(span.id, None)
+        if token is not None:
+            reset_current_span(token)
+
     # -- internals --------------------------------------------------------
 
     def _make_span(

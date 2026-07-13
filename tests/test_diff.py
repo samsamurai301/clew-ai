@@ -103,7 +103,8 @@ def test_format_text_non_empty(tmp_path: Path) -> None:
     d = diff(a, b)
     text = format_text(d)
     assert "root" in text
-    assert "ta" in text and "tb" in text
+    assert "ta" in text
+    assert "tb" in text
 
 
 def test_format_json_roundtrips(tmp_path: Path) -> None:

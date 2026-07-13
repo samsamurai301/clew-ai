@@ -105,7 +105,7 @@ def diff(trace_a: Trace, trace_b: Trace) -> TraceDiff:
     """
     _, paths_a = _index(trace_a)
     _, paths_b = _index(trace_b)
-    spans_by_path_a: dict[str, Span] = {p: trace_a.spans[0] for p in paths_a.values()}  # placeholder
+    spans_by_path_a: dict[str, Span] = dict.fromkeys(paths_a.values(), trace_a.spans[0])  # placeholder
     # Build proper maps.
     spans_by_path_a = {paths_a[s.id]: s for s in trace_a.spans}
     spans_by_path_b = {paths_b[s.id]: s for s in trace_b.spans}

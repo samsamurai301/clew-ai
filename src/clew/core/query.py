@@ -51,6 +51,7 @@ class QueryFilter:
     limit: int = 50
 
     def to_dict(self) -> dict[str, object]:
+        """Serialize the filter as a JSON-safe dict."""
         d: dict[str, object] = {"limit": self.limit}
         if self.name is not None:
             d["name"] = self.name

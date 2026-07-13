@@ -157,5 +157,6 @@ class BranchManager:
         """Return the span id the current branch points at."""
         return self._read_ref(self.current())
 
-    def __repr__(self) -> str:  # pragma: no cover - debug aid
+    def __repr__(self) -> str:
+        """Compact string repr for debugging."""  # pragma: no cover - debug aid
         return f"BranchManager(refs_dir={self._refs_dir!s}, head={self.current()!r})"

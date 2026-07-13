@@ -2,66 +2,211 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>clew trace e2bf0ed0fa754eba</title>
+<title>clew trace 7115fb9839114235</title>
 <style>
-  :root {
-    --bg: #0d1117; --fg: #c9d1d9; --muted: #8b949e;
-    --accent: #58a6ff; --error: #f85149; --ok: #3fb950;
-    --border: #30363d; --row: #161b22;
-  }
-  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-         background: var(--bg); color: var(--fg);
-         margin: 0; padding: 24px; line-height: 1.5; }
-  h1 { color: var(--accent); margin: 0 0 4px; font-size: 1.4em; }
-  h2 { margin-top: 32px; font-size: 1.1em; border-bottom: 1px solid var(--border);
-        padding-bottom: 4px; }
-  .meta { color: var(--muted); font-size: 0.9em; margin-bottom: 16px; }
-  .meta code { background: var(--row); padding: 2px 6px; border-radius: 3px; }
-  ul.tree, ul.tree ul { list-style: none; padding-left: 20px; }
-  ul.tree { padding-left: 0; }
-  .span { border: 1px solid var(--border); border-radius: 6px;
-           padding: 8px 12px; margin: 4px 0; background: var(--row); }
-  .span.error { border-color: var(--error); }
-  .span-head { display: flex; gap: 8px; align-items: center;
-                cursor: pointer; user-select: none; }
-  .caret { color: var(--muted); width: 1em; }
-  .name { font-weight: 600; }
-  .type { color: var(--muted); font-size: 0.85em;
-           background: var(--bg); padding: 1px 6px; border-radius: 3px; }
-  .status-ok { color: var(--ok); font-size: 0.85em; }
-  .status-error { color: var(--error); font-size: 0.85em; font-weight: 600; }
-  .id { color: var(--muted); font-size: 0.75em; font-family: monospace; }
-  .duration { color: var(--muted); font-size: 0.85em; margin-left: auto; }
-  .details { margin-top: 8px; padding: 8px 12px;
-              background: var(--bg); border-radius: 4px; display: none; }
-  .details.open { display: block; }
-  .details pre { overflow-x: auto; white-space: pre-wrap;
-                  word-wrap: break-word; max-width: 100%;
-                  font-size: 0.85em; margin: 4px 0; }
-  .label { color: var(--muted); font-size: 0.8em;
-            text-transform: uppercase; letter-spacing: 0.05em; }
-  .controls { margin: 16px 0; }
-  .controls button { background: var(--row); color: var(--fg);
-                     border: 1px solid var(--border); padding: 4px 10px;
-                     border-radius: 4px; cursor: pointer; margin-right: 8px; }
-  .controls button:hover { border-color: var(--accent); }
+:root {
+  --bg: #0d1117;
+  --bg-2: #161b22;
+  --bg-3: #1f2530;
+  --fg: #c9d1d9;
+  --fg-bright: #f0f6fc;
+  --muted: #8b949e;
+  --border: #30363d;
+  --accent: #58a6ff;
+  --accent-2: #79c0ff;
+  --ok: #3fb950;
+  --error: #f85149;
+  --warning: #d29922;
+  --purple: #bc8cff;
+}
+* { box-sizing: border-box; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI",
+               Roboto, "Helvetica Neue", sans-serif;
+  background: var(--bg);
+  color: var(--fg);
+  margin: 0; padding: 0; line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+a { color: var(--accent-2); text-decoration: none; }
+a:hover { text-decoration: underline; }
+.container { max-width: 1100px; margin: 0 auto; padding: 32px 24px; }
+
+/* ----- Header ----- */
+header {
+  display: flex; align-items: baseline; gap: 16px;
+  padding-bottom: 16px; border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+header h1 {
+  font-size: 1.6em; color: var(--fg-bright);
+  margin: 0; font-weight: 600;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+header .pill {
+  display: inline-block; padding: 2px 10px;
+  border: 1px solid var(--border); border-radius: 999px;
+  font-size: 0.8em; color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.meta { color: var(--muted); font-size: 0.9em; margin: 8px 0 0; }
+.meta code { background: var(--bg-2); padding: 2px 6px; border-radius: 3px; }
+
+/* ----- Stats panel ----- */
+.stats {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 12px; margin: 24px 0;
+}
+.stat {
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 16px;
+}
+.stat .label {
+  font-size: 0.75em; color: var(--muted);
+  text-transform: uppercase; letter-spacing: 0.06em;
+  font-weight: 600;
+}
+.stat .value {
+  font-size: 1.6em; color: var(--fg-bright);
+  font-weight: 600; margin-top: 4px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.stat.error .value { color: var(--error); }
+.stat.ok .value { color: var(--ok); }
+.stat.accent .value { color: var(--accent); }
+
+/* ----- Controls ----- */
+.controls {
+  margin: 16px 0; display: flex; gap: 8px; align-items: center;
+}
+.controls button {
+  background: var(--bg-2); color: var(--fg);
+  border: 1px solid var(--border); padding: 5px 12px;
+  border-radius: 6px; cursor: pointer;
+  font-size: 0.85em; font-family: inherit;
+}
+.controls button:hover { border-color: var(--accent); color: var(--fg-bright); }
+.controls .search {
+  background: var(--bg-2); color: var(--fg);
+  border: 1px solid var(--border); padding: 5px 10px;
+  border-radius: 6px; flex: 1; max-width: 360px;
+  font-size: 0.85em; font-family: inherit;
+}
+.controls .search:focus { outline: none; border-color: var(--accent); }
+
+/* ----- Tree ----- */
+ul.tree, ul.tree ul {
+  list-style: none; padding-left: 20px; margin: 0;
+}
+ul.tree { padding-left: 0; }
+.span {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  margin: 4px 0;
+  background: var(--bg-2);
+  transition: border-color 0.1s;
+}
+.span.error { border-color: var(--error); }
+.span.running { border-color: var(--warning); }
+.span-head {
+  display: flex; gap: 8px; align-items: center;
+  padding: 8px 12px; cursor: pointer; user-select: none;
+}
+.span-head:hover { background: var(--bg-3); }
+.caret {
+  color: var(--muted); width: 1em; flex-shrink: 0;
+  font-family: ui-monospace, monospace; font-size: 0.8em;
+}
+.name {
+  font-weight: 600; color: var(--fg-bright);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.type {
+  color: var(--accent-2); font-size: 0.78em;
+  background: var(--bg);
+  padding: 1px 6px; border-radius: 3px;
+  font-family: ui-monospace, monospace;
+  border: 1px solid var(--border);
+}
+.status-ok { color: var(--ok); font-size: 0.78em; }
+.status-error { color: var(--error); font-size: 0.78em; font-weight: 600; }
+.status-running { color: var(--warning); font-size: 0.78em; }
+.id { color: var(--muted); font-size: 0.72em;
+      font-family: ui-monospace, monospace; margin-left: auto; }
+.duration { color: var(--muted); font-size: 0.78em; }
+.details {
+  margin: 0 12px 10px 28px; padding: 10px 12px;
+  background: var(--bg); border-radius: 4px;
+  border-left: 2px solid var(--border);
+  display: none;
+}
+.details.open { display: block; }
+.details .label {
+  color: var(--muted); font-size: 0.7em;
+  text-transform: uppercase; letter-spacing: 0.06em;
+  font-weight: 600; margin: 8px 0 2px;
+}
+.details pre {
+  overflow-x: auto; white-space: pre-wrap; word-wrap: break-word;
+  max-width: 100%; font-size: 0.82em; margin: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--fg);
+  line-height: 1.5;
+}
+
+/* ----- Footer ----- */
+footer {
+  margin-top: 40px; padding-top: 16px;
+  border-top: 1px solid var(--border);
+  color: var(--muted); font-size: 0.85em;
+  display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px;
+}
+footer a { color: var(--accent-2); }
 </style>
 </head>
 <body>
-<h1>clew trace <span class="id">e2bf0ed0fa754eba</span></h1>
-<div class="meta">
-  root: <code>a9050352f2e74f27</code> · spans: <strong>5</strong> ·
-  errors: <strong>1</strong> · started: 2024-01-01T00:00:00+00:00
-</div>
-<div class="controls">
-  <button onclick="document.querySelectorAll('.details').forEach(e => e.classList.add('open'))">Expand all</button>
-  <button onclick="document.querySelectorAll('.details').forEach(e => e.classList.remove('open'))">Collapse all</button>
-</div>
-<ul class="tree">
+<div class="container">
+  <header>
+    <h1>clew trace <span class="id">7115fb9839114235</span></h1>
+    <span class="pill">5 spans · 1 error</span>
+  </header>
+  <p class="meta">
+    root: <code>bd3cf87f51b641fe</code> · depth: <strong>4</strong> ·
+    duration: <strong>500ms</strong> · started: 2024-01-01T12:00:00+00:00
+  </p>
+
+  <div class="stats">
+    <div class="stat">
+      <div class="label">Spans</div>
+      <div class="value">5</div>
+    </div>
+    <div class="stat error">
+      <div class="label">Errors</div>
+      <div class="value">1</div>
+    </div>
+    <div class="stat accent">
+      <div class="label">Max depth</div>
+      <div class="value">4</div>
+    </div>
+    <div class="stat">
+      <div class="label">Total time</div>
+      <div class="value">500ms</div>
+    </div>
+  </div>
+
+  <div class="controls">
+    <input type="search" class="search" data-role="search" placeholder="Filter spans by name, type, content…" />
+    <button data-action="expand-all">Expand all</button>
+    <button data-action="collapse-all">Collapse all</button>
+  </div>
+
+  <ul class="tree">
 <li><div class="span">
-<div class="span-head"><span class="caret">▶</span><span class="name">research_agent</span><span class="type">OBSERVATION</span><span class="status-ok">OK</span><span class="duration">2000.0ms</span></div>
+<div class="span-head"><span class="caret">▶</span><span class="name">research_agent</span><span class="type">OBSERVATION</span><span class="status-ok">OK</span><span class="duration">100.0ms</span><span class="id">bd3cf87f51b6</span></div>
 <div class="details">
-<div class="label">id</div><div class="id">a9050352f2e74f27beb6803fa7fa636b</div>
+<div class="label">id</div><pre>bd3cf87f51b641febef36c5edf78f1d3</pre>
 <div class="label">attributes</div><pre>{
   &quot;question&quot;: &quot;what is clew?&quot;
 }</pre>
@@ -72,20 +217,16 @@
 </div></div>
 <ul>
 <li><div class="span">
-<div class="span-head"><span class="caret">▶</span><span class="name">plan</span><span class="type">LLM</span><span class="status-ok">OK</span><span class="duration">1000.0ms</span></div>
+<div class="span-head"><span class="caret">▶</span><span class="name">plan</span><span class="type">LLM</span><span class="status-ok">OK</span><span class="duration">100.0ms</span><span class="id">974b1ceaffc4</span></div>
 <div class="details">
-<div class="label">id</div><div class="id">b7359ed66a22490085ae163d4c27e315</div>
-<div class="label">parent_ids</div><div class="id">a9050352f2e74f27beb6803fa7fa636b</div>
+<div class="label">id</div><pre>974b1ceaffc44ce295c3ed760f19dbfe</pre>
+<div class="label">parent_ids</div><pre>bd3cf87f51b641febef36c5edf78f1d3</pre>
 <div class="label">attributes</div><pre>{
-  &quot;model&quot;: &quot;gpt-4o&quot;
+  &quot;model&quot;: &quot;gpt-4o&quot;,
+  &quot;temperature&quot;: 0.7
 }</pre>
 <div class="label">input</div><pre>{
-  &quot;messages&quot;: [
-    {
-      &quot;content&quot;: &quot;plan: what is clew?&quot;,
-      &quot;role&quot;: &quot;user&quot;
-    }
-  ]
+  &quot;messages&quot;: &quot;plan: what is clew?&quot;
 }</pre>
 <div class="label">output</div><pre>1. Define clew
 2. Compare to git
@@ -93,10 +234,10 @@
 </div></div>
 <ul>
 <li><div class="span">
-<div class="span-head"><span class="caret">▶</span><span class="name">search</span><span class="type">TOOL</span><span class="status-ok">OK</span><span class="duration">1000.0ms</span></div>
+<div class="span-head"><span class="caret">▶</span><span class="name">web_search</span><span class="type">TOOL</span><span class="status-ok">OK</span><span class="duration">100.0ms</span><span class="id">6f3c26024eb5</span></div>
 <div class="details">
-<div class="label">id</div><div class="id">85e29352777c4b248e42c37722066b7e</div>
-<div class="label">parent_ids</div><div class="id">b7359ed66a22490085ae163d4c27e315</div>
+<div class="label">id</div><pre>6f3c26024eb54fd9a522ec3c7f960c8d</pre>
+<div class="label">parent_ids</div><pre>974b1ceaffc44ce295c3ed760f19dbfe</pre>
 <div class="label">attributes</div><pre>{
   &quot;tool_name&quot;: &quot;web_search&quot;
 }</pre>
@@ -107,13 +248,14 @@
 </div></div>
 <ul>
 <li><div class="span error">
-<div class="span-head"><span class="caret">▶</span><span class="name">fetch</span><span class="type">TOOL</span><span class="status-error">ERROR</span><span class="duration">1000.0ms</span></div>
+<div class="span-head"><span class="caret">▶</span><span class="name">fetch</span><span class="type">TOOL</span><span class="status-error">ERROR</span><span class="duration">100.0ms</span><span class="id">d01a7b422093</span></div>
 <div class="details">
-<div class="label">id</div><div class="id">59af93b3605342b8b706f0948c192a17</div>
-<div class="label">parent_ids</div><div class="id">85e29352777c4b248e42c37722066b7e</div>
-<div class="label">error</div><pre>HTTP 503: upstream timeout</pre>
+<div class="label">id</div><pre>d01a7b422093402699feeca010623720</pre>
+<div class="label">parent_ids</div><pre>6f3c26024eb54fd9a522ec3c7f960c8d</pre>
+<div class="label">error</div><pre>HTTP 503: Service Unavailable</pre>
 <div class="label">attributes</div><pre>{
-  &quot;tool_name&quot;: &quot;http_get&quot;
+  &quot;tool_name&quot;: &quot;http_get&quot;,
+  &quot;url&quot;: &quot;https://clew.dev&quot;
 }</pre>
 <div class="label">input</div><pre>{
   &quot;url&quot;: &quot;https://clew.dev&quot;
@@ -121,31 +263,28 @@
 </div></div>
 </ul>
 <li><div class="span">
-<div class="span-head"><span class="caret">▶</span><span class="name">answer</span><span class="type">LLM</span><span class="status-ok">OK</span><span class="duration">2000.0ms</span></div>
+<div class="span-head"><span class="caret">▶</span><span class="name">answer</span><span class="type">LLM</span><span class="status-ok">OK</span><span class="duration">100.0ms</span><span class="id">4d2a91d1a6b4</span></div>
 <div class="details">
-<div class="label">id</div><div class="id">fcf806e30eda4933bb0620193d142256</div>
-<div class="label">parent_ids</div><div class="id">b7359ed66a22490085ae163d4c27e315</div>
+<div class="label">id</div><pre>4d2a91d1a6b447ccb10ac467240c332a</pre>
+<div class="label">parent_ids</div><pre>974b1ceaffc44ce295c3ed760f19dbfe</pre>
 <div class="label">attributes</div><pre>{
-  &quot;model&quot;: &quot;gpt-4o&quot;
+  &quot;model&quot;: &quot;gpt-4o&quot;,
+  &quot;temperature&quot;: 0.3
 }</pre>
 <div class="label">input</div><pre>{
-  &quot;messages&quot;: [
-    {
-      &quot;content&quot;: &quot;synthesize&quot;,
-      &quot;role&quot;: &quot;user&quot;
-    }
-  ]
+  &quot;messages&quot;: &quot;synthesize&quot;
 }</pre>
-<div class="label">output</div><pre>Based on the plan and partial results, clew is...</pre>
+<div class="label">output</div><pre>clew is a local-first debugger for AI agent reasoning traces.</pre>
 </div></div>
 </ul>
 </ul>
-</ul>
-<hr style="margin: 32px 0; border: none; border-top: 1px solid var(--border);">
-<p class="meta">
-  Generated by <a href="https://github.com/clew/clew" style="color: var(--accent);">clew</a> ·
-  <span class="id">2026-07-13T21:57:28.624008+00:00</span>
-</p>
+  </ul>
+
+  <footer>
+    <span>Generated by <a href="https://github.com/clew/clew">clew</a></span>
+    <span class="id">2026-07-13T22:19:07.661620+00:00</span>
+  </footer>
+</div>
 <script>
 document.querySelectorAll('.span-head').forEach(head => {
   head.addEventListener('click', () => {
@@ -159,6 +298,28 @@ document.querySelectorAll('.span-head').forEach(head => {
     }
   });
 });
+document.querySelectorAll('[data-action="expand-all"]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.details').forEach(e => e.classList.add('open'));
+    document.querySelectorAll('.caret').forEach(c => c.textContent = '▼');
+  });
+});
+document.querySelectorAll('[data-action="collapse-all"]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.details').forEach(e => e.classList.remove('open'));
+    document.querySelectorAll('.caret').forEach(c => c.textContent = '▶');
+  });
+});
+const search = document.querySelector('[data-role="search"]');
+if (search) {
+  search.addEventListener('input', () => {
+    const q = search.value.toLowerCase();
+    document.querySelectorAll('.span').forEach(s => {
+      const text = s.textContent.toLowerCase();
+      s.style.display = (!q || text.includes(q)) ? '' : 'none';
+    });
+  });
+}
 </script>
 </body>
 </html>

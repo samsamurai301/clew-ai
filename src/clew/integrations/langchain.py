@@ -47,6 +47,7 @@ class ClewCallbackHandler:
     """
 
     def __init__(self, tracer: Tracer) -> None:
+        """Construct a callback handler bound to ``tracer``."""
         self._tracer = tracer
         # run_id -> span id (we maintain our own mapping)
         self._spans: dict[str, str] = {}

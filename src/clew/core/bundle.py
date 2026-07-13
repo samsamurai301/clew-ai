@@ -73,6 +73,9 @@ def generate_keypair() -> tuple[bytes, bytes]:
 
 
 def load_private_key(path: Path) -> Ed25519PrivateKey:
+    """Load an Ed25519 private key from a PEM file."""
+    """Load an Ed25519 private key from a PEM file."""
+    """Load an Ed25519 private key from a PEM file."""
     pem = path.read_bytes()
     key = load_pem_private_key(pem, password=None)
     if not isinstance(key, Ed25519PrivateKey):
@@ -81,6 +84,9 @@ def load_private_key(path: Path) -> Ed25519PrivateKey:
 
 
 def load_public_key(path: Path) -> Ed25519PublicKey:
+    """Load an Ed25519 public key from a PEM file."""
+    """Load an Ed25519 public key from a PEM file."""
+    """Load an Ed25519 public key from a PEM file."""
     pem = path.read_bytes()
     key = load_pem_public_key(pem)
     if not isinstance(key, Ed25519PublicKey):

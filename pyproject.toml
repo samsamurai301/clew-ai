@@ -1,6 +1,6 @@
 [project]
 name = "clew"
-version = "1.1.0"
+version = "1.1.1"
 description = "Local-first, content-addressed, git-style debugger for AI agent reasoning traces."
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
@@ -17,9 +17,10 @@ keywords = [
     "opentelemetry",
     "merkle-dag",
     "version-control",
+    "mcp",
 ]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 5 - Production/Stable",
     "Environment :: Console",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
@@ -33,15 +34,15 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "pydantic>=2.11",
-    "typer>=0.15",
-    "rich>=14",
-    "textual>=1.0",
-    "platformdirs>=4",
-    "httpx>=0.28",
-    "opentelemetry-api>=1.30",
-    "anyio>=4",
-    "cryptography>=43",
+    "pydantic>=2.11,<3",
+    "typer>=0.15,<1",
+    "rich>=14,<16",
+    "textual>=1.0,<9",
+    "platformdirs>=4,<5",
+    "httpx>=0.28,<1",
+    "opentelemetry-api>=1.30,<2",
+    "anyio>=4,<5",
+    "cryptography>=43,<50",
 ]
 
 [project.urls]
@@ -49,54 +50,79 @@ Homepage = "https://github.com/clew/clew"
 Documentation = "https://clew.dev"
 Repository = "https://github.com/clew/clew"
 Issues = "https://github.com/clew/clew/issues"
+Changelog = "https://github.com/clew/clew/blob/main/CHANGELOG.md"
+MCP = "https://modelcontextprotocol.io"
 
 [project.scripts]
 clew = "clew.cli:app"
 
 [project.entry-points."clew.plugins"]
-# third-party plugins register here; e.g.:
-# my-plugin = "my_plugin:Plugin"
+# Third-party plugins register here. See docs/internals/plugins.md.
+# Example: my-plugin = "my_plugin:Plugin"
 
-# PEP 735 dependency groups — uv's native dev-deps format
+# Optional extras — install with `pip install 'clew[mcp]'`.
 [project.optional-dependencies]
-mcp = ["mcp>=1.0"]
-all = ["mcp>=1.0"]
-
-[dependency-groups]
-docs = ["mkdocs>=1.6", "mkdocs-material>=9.5"]
-
+mcp = ["mcp>=1.0,<2"]
+all = ["mcp>=1.0,<2"]
 dev = [
-    "mcp>=1.0",
-    "mkdocs>=1.6",
-    "mkdocs-material>=9.5",
-    "pytest>=8",
-    "pytest-asyncio>=0.24",
-    "pytest-cov>=6",
-    "ruff>=0.12",
-    "mypy>=1.13",
+    "mcp>=1.0,<2",
+    "pytest>=8,<10",
+    "pytest-asyncio>=0.24,<2",
+    "pytest-cov>=6,<8",
+    "ruff>=0.12,<1",
+    "mypy>=1.13,<2",
+]
+
+# uv-native dev / docs groups (PEP 735). Used by `uv sync --group dev`.
+[dependency-groups]
+docs = [
+    "mkdocs>=1.6,<2",
+    "mkdocs-material>=9.5,<10",
+]
+dev = [
+    "mcp>=1.0,<2",
+    "pytest>=8,<10",
+    "pytest-asyncio>=0.24,<2",
+    "pytest-cov>=6,<8",
+    "ruff>=0.12,<1",
+    "mypy>=1.13,<2",
     # Note: `platformdirs>=4` ships its own type hints inline; no
-    # separate types- package is published on PyPI.
+    # separate types- stub is published on PyPI.
 ]
 
 # ---------------------------------------------------------------------------
-# Tool configuration
+# Build system
 # ---------------------------------------------------------------------------
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/clew"]
 
+[tool.hatch.build.targets.sdist]
+include = [
+    "src/clew",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md",
+    "docs",
+    "examples",
+    "tests",
+]
+
+# ---------------------------------------------------------------------------
+# Ruff
+# ---------------------------------------------------------------------------
+
 [tool.ruff]
 line-length = 100
 target-version = "py311"
 src = ["src", "tests"]
-extend-exclude = [".venv", "dist", "build"]
+extend-exclude = [".venv", "dist", "build", ".mavis"]
 
 [tool.ruff.lint]
-# Sensible default rule set; individual tasks may extend.
 select = [
     "E",   # pycodestyle errors
     "W",   # pycodestyle warnings
@@ -107,20 +133,45 @@ select = [
     "N",   # pep8-naming
     "SIM", # flake8-simplify
     "RUF", # ruff-specific
+    "C4",  # flake8-comprehensions
+    "PIE", # flake8-pie
+    "PT",  # flake8-pytest-style
+    "RET", # flake8-return
+    "TID", # flake8-tidy-imports
 ]
 ignore = [
-    "E501",  # line length is enforced by the formatter, not the linter
+    "E501",   # line length is enforced by the formatter
+    "PT011",  # pytest.raises without match= is fine in this codebase
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**/*.py" = ["B011", "F841", "RUF059", "E741", "RUF043", "B018", "N814"]  # asserts + pre-existing test vars are fine
-"src/clew/cli.py" = ["B008", "RUF059"]
-"src/clew/ui/tui.py" = ["RUF012"]  # textual BINDINGS is a class-level constant  # typer defaults; unused tuple fields; textual BINDINGS
+"tests/**/*.py" = [
+    "B011",  # asserts are fine
+    "F841",  # local-variable-not-used (test scaffolding)
+    "RUF059", # unused unpacked variables
+    "E741",  # ambiguous variable name (test scaffolding)
+    "RUF043", # pytest.raises match= regex (test scaffolding)
+    "B018",  # useless-expression (test scaffolding)
+    "N814",  # camelcase imported as constant (test scaffolding)
+    "PT012", # pytest.raises multi-line (test scaffolding)
+    "SIM117", # nested with statements (test scaffolding)
+]
+"src/clew/cli.py" = [
+    "B008",  # typer defaults
+    "RUF059", # unused unpacked (decorated functions)
+]
+"src/clew/ui/tui.py" = [
+    "RUF012", # textual BINDINGS is a class-level constant
+]
 
 [tool.ruff.format]
 quote-style = "double"
 indent-style = "space"
 docstring-code-format = true
+
+# ---------------------------------------------------------------------------
+# Mypy
+# ---------------------------------------------------------------------------
 
 [tool.mypy]
 python_version = "3.11"
@@ -134,13 +185,33 @@ no_implicit_optional = true
 warn_return_any = true
 plugins = ["pydantic.mypy"]
 
+# cli.py uses typer.Exit for control flow, which mypy can't always prove
+# is NoReturn. Suppress the unreachable warnings rather than litter the
+# code with `raise` after every _err() call.
 [[tool.mypy.overrides]]
 module = "clew.cli"
 disable_error_code = ["unreachable"]
 
+# Some of these are surface-area modules where the third-party SDK is
+# untyped; we keep the rest of the codebase strict.
 [[tool.mypy.overrides]]
-module = ["textual.*", "rich.*"]
+module = [
+    "clew.ui.tui",
+    "clew.ui.render",
+    "clew.sdk.tracer",
+    "clew.sdk.otel",
+    "clew.mcp_server",
+]
+ignore_errors = true
+
+# Third-party deps without type hints.
+[[tool.mypy.overrides]]
+module = ["textual.*", "rich.*", "mcp.*", "pydantic.mypy"]
 ignore_missing_imports = true
+
+# ---------------------------------------------------------------------------
+# Pytest
+# ---------------------------------------------------------------------------
 
 [tool.pytest.ini_options]
 minversion = "8.0"
@@ -157,16 +228,17 @@ markers = [
     "slow: marks tests as slow (deselect with -m 'not slow')",
     "integration: marks tests requiring a real LLM API key",
 ]
-filterwarnings = [
-    "error",
-    "ignore::DeprecationWarning:platformdirs.*",
-]
+
+# ---------------------------------------------------------------------------
+# Coverage
+# ---------------------------------------------------------------------------
 
 [tool.coverage.run]
 branch = true
 source = ["src/clew"]
 omit = [
     "src/clew/__main__.py",
+    "src/clew/_version.py",
 ]
 
 [tool.coverage.report]
@@ -178,12 +250,5 @@ exclude_lines = [
     "if TYPE_CHECKING:",
     "if __name__ == .__main__.:",
     "raise NotImplementedError",
+    "\\.\\.\\.",
 ]
-
-[[tool.mypy.overrides]]
-module = "clew.cli"
-disable_error_code = ["unreachable"]
-
-[[tool.mypy.overrides]]
-module = ["clew.ui.tui", "clew.sdk.tracer", "clew.ui.render", "clew.sdk.otel", "clew.mcp_server"]
-ignore_errors = true

@@ -60,6 +60,7 @@ class Issue:
     message: str
 
     def to_dict(self) -> dict[str, str]:
+        """Serialize the issue as a JSON-safe dict."""
         return {
             "severity": self.severity.value,
             "code": self.code,
@@ -81,14 +82,17 @@ class DoctorReport:
 
     @property
     def errors(self) -> tuple[Issue, ...]:
+        """All issues with severity ERROR."""
         return tuple(i for i in self.issues if i.severity is Severity.ERROR)
 
     @property
     def warnings(self) -> tuple[Issue, ...]:
+        """All issues with severity WARNING."""
         return tuple(i for i in self.issues if i.severity is Severity.WARNING)
 
     @property
     def healthy(self) -> bool:
+        """True iff the report has no errors (warnings are OK)."""
         return not self.errors
 
 
@@ -332,6 +336,7 @@ class GcResult:
     deleted_ids: tuple[str, ...]
 
     def to_dict(self) -> dict[str, object]:
+        """Serialize the GC result as a JSON-safe dict."""
         return {
             "scanned": self.scanned,
             "deleted": self.deleted,

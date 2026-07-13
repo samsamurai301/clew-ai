@@ -54,6 +54,16 @@ from clew.core.store import Store
 from clew.core.trace import TraceStore
 from clew.ui.render import render_diff, render_log, render_span_tree
 
+
+def _version_callback(value: bool) -> None:
+    """Print the clew version and exit (--version flag)."""
+    if value:
+        from clew import __version__
+
+        typer.echo(f"clew {__version__}")
+        raise typer.Exit()
+
+
 #: The typer app. Configured as the entry point in pyproject.toml.
 app = typer.Typer(
     name="clew",
@@ -61,6 +71,20 @@ app = typer.Typer(
     no_args_is_help=True,
     add_completion=False,
 )
+
+
+@app.callback()
+def _root(
+    version: bool = typer.Option(
+        False,
+        "--version",
+        "-V",
+        help="Print the clew version and exit.",
+        callback=_version_callback,
+        is_eager=True,
+    ),
+) -> None:
+    """Top-level options shared by every subcommand."""
 
 #: Shared rich console for error reporting.
 _err_console = Console(stderr=True, style="red")
@@ -830,3 +854,61 @@ def cmd_mcp() -> None:
             "Install with `uv add 'clew[mcp]'`."
         )
     raise typer.Exit(code=mcp_main())
+
+
+# ---------------------------------------------------------------------------
+# bench — scaling benchmark
+# ---------------------------------------------------------------------------
+
+
+@app.command("bench")
+def cmd_bench(
+    spans: int = typer.Option(
+        5_000, "--spans", help="Spans per trace for the scaling test."
+    ),
+    traces: int = typer.Option(
+        100, "--traces", help="Number of traces to record."
+    ),
+    orphans: int = typer.Option(
+        1_000, "--orphans", help="Number of orphan spans to GC."
+    ),
+    out: Path | None = typer.Option(
+        None,
+        "--out",
+        help="Optional JSON file to write the result to.",
+    ),
+) -> None:
+    """Run the in-process scaling benchmark.
+
+    Reports three timings:
+
+    * ``record`` — record ``N`` traces of ``M`` spans each.
+    * ``diff``   — diff the first and last recorded trace.
+    * ``gc``     — run GC on ``K`` orphan spans.
+
+    All operations run in a fresh tempdir; the existing store is
+    untouched. Exits 0 on success; non-zero on a failed assertion.
+    """
+    import tempfile
+
+    from clew.bench import bench as _run_bench
+
+    with tempfile.TemporaryDirectory() as tmp:
+        try:
+            r = _run_bench(
+                Path(tmp) / ".clew",
+                n_traces=traces,
+                spans_per_trace=spans,
+                n_orphans=orphans,
+            )
+        except AssertionError as exc:
+            _err(f"bench failed: {exc}")
+    if out is not None:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(r, indent=2), encoding="utf-8")
+        typer.echo(f"wrote {out}")
+    typer.echo(f"record  : {r['record_ms']:.0f}ms ({r['traces_recorded']} traces, "
+               f"{r['spans_per_trace']} spans/trace)")
+    typer.echo(f"diff    : {r['diff_ms']:.0f}ms ({r['diff_added']}+{r['diff_removed']}+{r['diff_changed']} changes)")
+    typer.echo(f"gc      : {r['gc_ms']:.0f}ms ({r['orphans_scanned']} scanned, {r['orphans_deleted']} deleted)")
+    typer.echo(f"dedup   : {r['dedup_unique']} unique ids from {r['dedup_inputs']} inputs")

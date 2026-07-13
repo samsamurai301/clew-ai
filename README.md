@@ -2,12 +2,49 @@
 
 > **git for AI reasoning.** Trace, branch, replay, and diff your agent runs — locally, content-addressed, with a portable bundle format.
 
-[![1.0.0](https://img.shields.io/badge/version-1.0.0-blue.svg)]()
+[![1.1.1](https://img.shields.io/badge/version-1.1.1-blue.svg)]()
 [![MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org)
 [![uv](https://img.shields.io/badge/built%20with-uv-6c47ff.svg)](https://docs.astral.sh/uv/)
+[![Tests](https://img.shields.io/badge/tests-287%20passing-brightgreen.svg)](#)
+[![Coverage](https://img.shields.io/badge/coverage-87%25-brightgreen.svg)](#)
+[![MCP](https://img.shields.io/badge/MCP-compatible-purple.svg)](https://modelcontextprotocol.io)
 
 ---
+
+## What you get
+
+- **`@t.agent` / `@t.span` decorators** — instrument any sync, async, or generator function.
+- **Merkle DAG of content-addressed spans** — two identical inputs collapse to one id.
+- **Git-style branching** — `clew branch alt <span>` for a fork; `clew diff` for what changed.
+- **Replay engine** — `clew replay <trace>` re-executes through a mock or recording executor.
+- **MCP server** — talk to your traces from Claude Desktop, Cursor, Cline.
+- **HTML reports** — `clew show <id> --html` for a self-contained interactive page.
+- **OTel round-trip** — `clew export` to NDJSON, `clew otel-import` from any OTel stream.
+- **Signed bundles** — Ed25519 over the manifest + content hash over the spans.
+- **LangChain / OpenAI / Anthropic bridges** — auto-instrument without changing your code.
+- **GitHub Action** — record a trace during CI runs.
+
+[See the live demo →](./docs/assets/demo-trace.html)
+
+
+## What's new in v1.1.1
+
+* Polish sweep: docstrings, type hints, missing __version__, click 8.4+ --version fix.
+* New `clew bench` command — runs the in-process scaling benchmark with `--out` JSON.
+* Polished HTML report — stats panel, search/filter, expand-all, max depth, total time.
+* Three new internals docs: `content-addressing.md`, `replay.md`, `bundle-format.md`.
+* Full `pyproject.toml` polish: upper-bound version pins, full classifiers, full ruff+mypy config.
+* 287 tests, 87% coverage, `mypy --strict` clean across 29 source files.
+
+## What's new in v1.1.0
+
+* **MCP server** — `clew mcp` exposes 12 tools + 2 resources over the Model Context Protocol.
+* **HTML reports** — `clew show <id> --html <path>` for a single self-contained interactive page.
+* **LangChain callback handler** — `from clew.integrations.langchain import ClewCallbackHandler`.
+* **GitHub Action** — `.github/actions/clew-trace/action.yml` for `clew trace` in CI.
+* **Real LLM example** — `examples/real_llm_agent.py` works with OpenAI, Anthropic, or a mock fallback.
+* **mkdocs site** — full documentation under `docs/` with `mkdocs serve`.
 
 ## The problem
 

@@ -43,7 +43,7 @@ def _normalize(value: Any) -> Any:
         for k, v in value.items():
             items.append((str(k), _normalize(v)))
         items.sort(key=lambda kv: kv[0].encode("utf-8"))
-        return {k: v for k, v in items}
+        return dict(items)
     if isinstance(value, (list, tuple)):
         return [_normalize(v) for v in value]
     if isinstance(value, (set, frozenset)):

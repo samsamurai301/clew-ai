@@ -12,7 +12,7 @@ developer's toolchain.
   Claude Desktop, Cursor, Cline, and any other MCP-compatible
   client. 12 tools (list/get/search/branch/checkout/replay/
   diff/doctor/query) plus 2 resources (store://info, trace://id).
-  See the [MCP integration guide](../integrations/mcp.md).
+  See the [MCP integration guide](integrations/mcp.md).
 - **HTML trace reports** (`clew show <id> --html <path>`).
   Self-contained, interactive, dark-themed, works offline.
   Email a trace, gist it, drop it in Slack.
@@ -47,7 +47,7 @@ developer's toolchain.
 
 ## v1.0.0 — 2026-XX-XX
 
-First stable release. See the [changelog](../changelog.md) for
+First stable release. See the [changelog](changelog.md) for
 the full list of features from 0.1.0 → 1.0.0.
 
 ## v0.1.0 — 2026-01-XX

@@ -1,0 +1,12 @@
+# Default owners for everything in the repo.
+*                       @clew/core-maintainers
+
+# Security-sensitive code needs extra review.
+/src/clew/core/bundle.py   @clew/core-maintainers @clew/security
+/src/clew/core/store.py    @clew/core-maintainers @clew/security
+/src/clew/core/branch.py   @clew/core-maintainers @clew/security
+/SECURITY.md              @clew/security
+
+# Docs get a separate review.
+/docs/                    @clew/docs-team
+/mkdocs.yml               @clew/docs-team

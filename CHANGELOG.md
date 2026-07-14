@@ -47,7 +47,7 @@ is a defense against a known attack class.
   argv handling, HTML template escaping, and NDJSON bomb
   defense. 315 total tests, 87% coverage, mypy --strict clean.
 
-## [1.1.0] — 2026-XX-XX
+## [1.1.0] — 2026-07-13
 
 The ecosystem release. `clew` now ships integrations for the
 three most common LLM runtimes (MCP, LangChain, GitHub Actions)
@@ -83,7 +83,7 @@ and a portable HTML viewer for sharing traces by email.
 - Bundle `load_pem_*_key` errors now raise `ValueError`
   consistently.
 
-## [1.1.1] — 2026-XX-XX
+## [1.1.1] — 2026-07-13
 
 The polish release. No public API changes; everything is a
 tightening, a new doc page, or a developer-experience fix.
@@ -121,7 +121,7 @@ tightening, a new doc page, or a developer-experience fix.
 - **`__version__` is now dynamic** — read from
   `importlib.metadata`, no more hard-coded 1.0.0.
 
-## [1.0.0] — 2026-XX-XX
+## [1.0.0] — 2026-07-13
 
 The first stable release. `clew` is now production-ready for
 local-first agent debugging. Every public API is stable; only
@@ -219,7 +219,7 @@ work without changes.
 public API has at least one direct test; the CLI is exercised
 end-to-end via `typer.testing.CliRunner`.
 
-## [0.1.0] — 2026-01-XX
+## [0.1.0] — 2026-07-13
 
 The initial MVP. Content-addressed store, git-style branching,
 replay engine, structural diff, Python SDK, typer/rich CLI,

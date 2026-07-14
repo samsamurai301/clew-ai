@@ -78,6 +78,16 @@ class MockExecutor:
         input/output/attributes — the only thing that changes is
         the ``started_at``/``ended_at`` timestamps (set to now).
         """
+        return self.execute_sync(span, ctx)
+
+    def execute_sync(self, span: Span, ctx: ReplayContext) -> Span:
+        """Synchronous variant of :meth:`execute`.
+
+        Used by :class:`ReplayEngine._replay_sync`, which runs from
+        contexts (CLI commands, MCP tool handlers) that cannot
+        drive a coroutine because an event loop is already
+        running.
+        """
         now = datetime.now(UTC)
         return span.model_copy(update={"started_at": now, "ended_at": now, "status": SpanStatus.OK})
 
@@ -230,3 +240,67 @@ class ReplayEngine:
         # Re-fetch the trace from the store so the Trace object is
         # exactly what the store holds (with the store's chosen ids).
         return self._store.get_trace(new_trace_id)
+
+    def _replay_sync(
+        self,
+        trace_id: str,
+        executor: ReplayExecutor | None = None,
+    ) -> Trace:
+        """Synchronous version of :meth:`replay`.
+
+        For executors whose ``execute`` is a regular method (not a
+        coroutine), this avoids the overhead of spinning up an event
+        loop. Useful for CLI commands and MCP tool handlers that are
+        already inside a running loop.
+        """
+        ex = executor if executor is not None else self._executor
+        original = self._store.get_trace(trace_id)
+        new_trace_id = uuid4().hex
+        id_map: dict[str, str] = {}
+        for span in original.spans:
+            id_map[span.id] = uuid4().hex
+        for span in original.spans:
+            new_parents = [id_map.get(p, p) for p in span.parent_ids]
+            ctx = ReplayContext(
+                parent_chain=[s for s in original.spans if s.id in new_parents],
+            )
+            # Drive the executor synchronously. Most executors
+            # (including :class:`MockExecutor`) expose a sync
+            # ``execute_sync`` method. If the executor doesn't, we
+            # attempt the async path via ``asyncio.run`` — this only
+            # works if no event loop is already running.
+            sync_attr = getattr(ex, "execute_sync", None)
+            if sync_attr is not None:
+                result = sync_attr(span, ctx)
+            else:
+                import asyncio
+                import inspect
+                maybe_coro = ex.execute(span, ctx)
+                if inspect.iscoroutine(maybe_coro):
+                    try:
+                        loop = asyncio.get_event_loop()
+                        if loop.is_running():
+                            raise TypeError(
+                                "ReplayEngine._replay_sync cannot drive "
+                                "an async executor from within a running "
+                                "event loop; use ReplayEngine.replay "
+                                "from an async context instead."
+                            )
+                    except RuntimeError:
+                        pass
+                    result = asyncio.run(maybe_coro)
+                else:
+                    result = maybe_coro
+            ended = result.ended_at or result.started_at
+            rewritten = result.model_copy(
+                update={
+                    "id": id_map[span.id],
+                    "trace_id": new_trace_id,
+                    "parent_ids": new_parents,
+                    "started_at": ended,
+                    "ended_at": ended,
+                }
+            )
+            self._store.add_span(rewritten)
+        return self._store.get_trace(new_trace_id)
+

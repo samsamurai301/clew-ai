@@ -250,3 +250,256 @@ def test_unknown_tool_returns_error(tmp_path: Path) -> None:
     )
     parsed = json.loads(_text(out))
     assert "error" in parsed
+
+
+# ---------------------------------------------------------------------------
+# Missing-tool coverage
+# ---------------------------------------------------------------------------
+
+
+def test_diff_traces_tool(tmp_path: Path) -> None:
+    """``diff_traces`` returns a JSON diff with same key shape."""
+    from clew.core.branch import BranchManager
+    from clew.core.trace import TraceStore
+    store = Store(tmp_path / ".clew")
+    ts = TraceStore(store)
+    bm = BranchManager(ts)
+    # Two traces
+    tid_a = uuid4().hex
+    spans_a = [
+        _make_span(tid_a, name="a1"),
+        _make_span(tid_a, parent_ids=[], name="a2", type=SpanType.LLM),
+    ]
+    spans_a[1] = spans_a[1].model_copy(update={"parent_ids": [spans_a[0].id], "output": "out-A"})
+    for s in spans_a:
+        ts.add_span(s)
+    tid_b = uuid4().hex
+    spans_b = [
+        _make_span(tid_b, name="a1"),
+        _make_span(tid_b, parent_ids=[], name="a2", type=SpanType.LLM),
+    ]
+    spans_b[1] = spans_b[1].model_copy(update={"parent_ids": [spans_b[0].id], "output": "out-B"})
+    for s in spans_b:
+        ts.add_span(s)
+    bm.move("main", spans_a[0].id)
+    out = _call(
+        build_server(),
+        "diff_traces",
+        {"trace_a": tid_a, "trace_b": tid_b, "root": str(tmp_path / ".clew")},
+    )
+    text = _text(out)
+    parsed = json.loads(text)
+    assert "added" in parsed
+    assert "removed" in parsed
+    assert "modified" in parsed
+
+
+def test_replay_tool(tmp_path: Path) -> None:
+    """``replay`` returns a new trace_id different from the source."""
+    tid = _seed(tmp_path / ".clew")
+    out = _call(
+        build_server(),
+        "replay",
+        {"trace_id": tid, "root": str(tmp_path / ".clew")},
+    )
+    parsed = json.loads(_text(out))
+    assert "new_trace_id" in parsed
+    assert parsed["new_trace_id"] != tid
+
+
+def test_create_branch_defaults_to_head(tmp_path: Path) -> None:
+    """``create_branch`` without ``from_span`` uses current HEAD."""
+    from clew.core.branch import BranchManager
+    from clew.core.trace import TraceStore
+    _seed(tmp_path / ".clew")
+    out = _call(
+        build_server(),
+        "create_branch",
+        {"name": "auto", "root": str(tmp_path / ".clew")},
+    )
+    assert "auto" in _text(out)
+    # Verify it points at the same span as main
+    ts = TraceStore(Store(tmp_path / ".clew"))
+    bm = BranchManager(ts)
+    assert bm.get("auto").head_span_id == bm.get("main").head_span_id
+
+
+def test_show_branch_HEAD_alias(tmp_path: Path) -> None:
+    """``show_branch`` accepts the literal name ``HEAD``."""
+    _seed(tmp_path / ".clew")
+    out = _call(
+        build_server(),
+        "show_branch",
+        {"name": "HEAD", "root": str(tmp_path / ".clew")},
+    )
+    parsed = json.loads(_text(out))
+    assert parsed["branch"] == "HEAD"
+    assert len(parsed["spans"]) >= 1
+
+
+def test_search_with_metadata_filter(tmp_path: Path) -> None:
+    """``search`` accepts a ``metadata`` dict and filters by it."""
+    from clew.core.trace import TraceStore
+    store = Store(tmp_path / ".clew")
+    ts = TraceStore(store)
+    tid = uuid4().hex
+    s_with = _make_span(tid, name="with-meta", metadata={"model": "gpt-4o"})
+    s_without = _make_span(tid, parent_ids=[s_with.id], name="without-meta")
+    ts.add_span(s_with)
+    ts.add_span(s_without)
+    out = _call(
+        build_server(),
+        "search",
+        {"metadata": {"model": "gpt-4o"}, "root": str(tmp_path / ".clew")},
+    )
+    parsed = json.loads(_text(out))
+    names = {m["name"] for m in parsed["matches"]}
+    assert "with-meta" in names
+    assert "without-meta" not in names
+
+
+def test_query_with_metadata_specs(tmp_path: Path) -> None:
+    """``query`` accepts ``metadata_specs`` (k=v CLI form) and filters."""
+    from clew.core.trace import TraceStore
+    store = Store(tmp_path / ".clew")
+    ts = TraceStore(store)
+    tid = uuid4().hex
+    s1 = _make_span(tid, name="a", metadata={"temperature": 0.7})
+    s2 = _make_span(tid, parent_ids=[s1.id], name="b", metadata={"temperature": 0.3})
+    ts.add_span(s1)
+    ts.add_span(s2)
+    out = _call(
+        build_server(),
+        "query",
+        {"metadata_specs": ["temperature=0.7"], "root": str(tmp_path / ".clew")},
+    )
+    parsed = json.loads(_text(out))
+    names = {m["name"] for m in parsed["matches"]}
+    assert names == {"a"}
+
+
+def test_replay_tool_default_executor_is_mock(tmp_path: Path) -> None:
+    """``replay`` with no ``executor`` arg uses mock and is deterministic."""
+    tid = _seed(tmp_path / ".clew")
+    out1 = _call(
+        build_server(),
+        "replay",
+        {"trace_id": tid, "root": str(tmp_path / ".clew")},
+    )
+    out2 = _call(
+        build_server(),
+        "replay",
+        {"trace_id": tid, "root": str(tmp_path / ".clew")},
+    )
+    # Both replays should succeed; the resulting trace ids will
+    # differ (each replay gets a fresh trace_id).
+    p1 = json.loads(_text(out1))
+    p2 = json.loads(_text(out2))
+    assert "new_trace_id" in p1
+    assert "new_trace_id" in p2
+
+
+# ---------------------------------------------------------------------------
+# Error-path coverage
+# ---------------------------------------------------------------------------
+
+
+def test_unknown_tool_returns_error_dict(tmp_path: Path) -> None:
+    """An unknown tool returns a JSON error payload, not a crash."""
+    out = _call(
+        build_server(),
+        "no_such_tool",
+        {"root": str(tmp_path / ".clew")},
+    )
+    parsed = json.loads(_text(out))
+    assert "error" in parsed
+
+
+def test_get_trace_missing_returns_error(tmp_path: Path) -> None:
+    """``get_trace`` with a missing id returns a JSON error."""
+    _seed(tmp_path / ".clew")
+    out = _call(
+        build_server(),
+        "get_trace",
+        {"trace_id": "f" * 32, "root": str(tmp_path / ".clew")},
+    )
+    parsed = json.loads(_text(out))
+    assert "error" in parsed
+
+
+def test_get_span_missing_returns_error(tmp_path: Path) -> None:
+    """``get_span`` with a missing id returns a JSON error."""
+    _seed(tmp_path / ".clew")
+    out = _call(
+        build_server(),
+        "get_span",
+        {"span_id": "f" * 32, "root": str(tmp_path / ".clew")},
+    )
+    parsed = json.loads(_text(out))
+    assert "error" in parsed
+
+
+def test_search_with_invalid_type_returns_error(tmp_path: Path) -> None:
+    """``search`` with an invalid span type returns a JSON error."""
+    _seed(tmp_path / ".clew")
+    out = _call(
+        build_server(),
+        "search",
+        {"type": "BOGUS", "root": str(tmp_path / ".clew")},
+    )
+    parsed = json.loads(_text(out))
+    assert "error" in parsed
+
+
+# ---------------------------------------------------------------------------
+# Resource coverage
+# ---------------------------------------------------------------------------
+
+
+def test_read_resource_store_info(tmp_path: Path, monkeypatch) -> None:
+    """``store://info`` returns store metadata for the cwd-relative store.
+
+    We seed under tmp_path and use ``monkeypatch.chdir`` so the
+    resource's ``_open(None)`` finds the freshly-initialised store.
+    """
+    import asyncio
+    from mcp.types import ReadResourceRequest, ReadResourceRequestParams
+    _seed(tmp_path / ".clew")
+    monkeypatch.chdir(tmp_path)
+    server = build_server()
+    handler = server.request_handlers[ReadResourceRequest]
+    req = ReadResourceRequest(
+        params=ReadResourceRequestParams(
+            uri="store://info",  # type: ignore[arg-type]
+        )
+    )
+    result = asyncio.run(handler(req))
+    assert result.root.contents
+    text = result.root.contents[0].text
+    parsed = json.loads(text)
+    assert "version" in parsed
+    assert parsed["branches"] == ["main"]
+
+
+def test_read_resource_trace(tmp_path: Path, monkeypatch) -> None:
+    """``trace://<id>`` returns the trace for the given id.
+
+    Same pattern: seed under tmp_path and ``chdir`` so the resource
+    finds the right store.
+    """
+    import asyncio
+    from mcp.types import ReadResourceRequest, ReadResourceRequestParams
+    tid = _seed(tmp_path / ".clew")
+    monkeypatch.chdir(tmp_path)
+    server = build_server()
+    handler = server.request_handlers[ReadResourceRequest]
+    req = ReadResourceRequest(
+        params=ReadResourceRequestParams(
+            uri=f"trace://{tid}",  # type: ignore[arg-type]
+        )
+    )
+    result = asyncio.run(handler(req))
+    assert result.root.contents
+    text = result.root.contents[0].text
+    parsed = json.loads(text)
+    assert parsed["trace_id"] == tid

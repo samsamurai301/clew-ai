@@ -2,7 +2,7 @@
 
 > **git for AI reasoning.** Trace, branch, replay, and diff your agent runs — locally, content-addressed, with a portable bundle format.
 
-[![1.1.1](https://img.shields.io/badge/version-1.1.2-blue.svg)]()
+[![1.1.2](https://img.shields.io/badge/v1.1.2-blue.svg)]()
 [![MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org)
 [![uv](https://img.shields.io/badge/built%20with-uv-6c47ff.svg)](https://docs.astral.sh/uv/)

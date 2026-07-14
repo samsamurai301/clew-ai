@@ -1,0 +1,39 @@
+# GitHub Dependabot configuration
+# Reference: https://docs.github.com/en/code-security/dependabot/dependabot-version-updates
+
+version: 2
+updates:
+  # Python (uv-managed)
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    commit-message:
+      prefix: "deps"
+    labels:
+      - "dependencies"
+      - "python"
+    # Auto-rebase PRs that fall behind master
+    rebase-strategy: "auto"
+    # Limit PRs to avoid noise
+    open-pull-requests-limit: 10
+    # Group patch/minor updates together
+    groups:
+      patch-and-minor:
+        update-types:
+          - "minor"
+          - "patch"
+
+  # GitHub Actions
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    commit-message:
+      prefix: "ci"
+    labels:
+      - "dependencies"
+      - "ci"
+    open-pull-requests-limit: 5

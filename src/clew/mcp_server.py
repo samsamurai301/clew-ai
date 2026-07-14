@@ -268,7 +268,12 @@ def build_server() -> Server:
         ]
 
     @server.read_resource()
-    async def read_resource(uri: str) -> str:
+    async def read_resource(uri: object) -> str:
+        # The MCP type stub declares ``uri: str``, but the underlying
+        # transport passes an ``AnyUrl`` instance (a pydantic wrapper).
+        # Coerce to a plain str first so the comparison and
+        # ``startswith`` calls below work in both cases.
+        uri = str(uri)
         if uri == "store://info":
             try:
                 _, ts, root = _open(None)
@@ -276,11 +281,13 @@ def build_server() -> Server:
                 return json.dumps({"error": str(exc)})
             bm = BranchManager(ts)
             head = bm.head_span_id() if (root / "HEAD").exists() else None
+            branches = [b.name for b in bm.list()]
             return json.dumps(
                 {
+                    "version": 1,
                     "root": str(root),
                     "head": head,
-                    "branches": list(bm.list()),
+                    "branches": branches,
                     "trace_count": sum(1 for _ in ts.store.iter_traces()),
                 },
                 default=str,
@@ -459,22 +466,20 @@ def build_server() -> Server:
                 return [TextContent(type="text", text=f"checked out {arguments['name']!r}")]
 
             if name == "replay":
+                # The MCP tool handler is async, so we can't call
+                # ``asyncio.run`` from within it (it would either
+                # block the loop or raise ``RuntimeError`` if a loop
+                # is already running). The mock executor's
+                # ``execute`` is sync, so we run the replay loop
+                # ourselves — no need for a second event loop.
                 _, ts, _ = _open(arguments.get("root"))
                 trace = ts.get_trace(arguments["trace_id"])
                 arguments.get("executor", "mock")
                 executor = MockExecutor()
-                engine = ReplayEngine(ts, executor=executor)
-                # Replay is async-aware but mock executor is sync; the
-                # sync path is fine for our purposes.
-                import asyncio
-
-                new_trace_id = asyncio.run(
-                    engine.replay(
-                        trace.root_span_id,
-                        from_span_id=None,
-                        executor=executor,
-                    )
+                new_trace = ReplayEngine(ts, executor=executor)._replay_sync(
+                    trace.trace_id, executor=executor
                 )
+                new_trace_id = new_trace.trace_id
                 return [
                     TextContent(
                         type="text",

@@ -28,17 +28,22 @@ def _venv_with_clew() -> Path:
 
     Returns the path to the venv's python binary.
     """
-    venv = Path(tempfile.mkdtemp(prefix="clew_e2e_venv_"))
+    # Auto-discover the latest built wheel.
+    dist_dir = Path(__file__).resolve().parent.parent / "dist"
+    wheels = sorted(dist_dir.glob("clew-*.whl"))
+    if not wheels:
+        # Build it
+        subprocess.run(["uv", "build"], cwd=dist_dir.parent, check=True, capture_output=True)
+        wheels = sorted(dist_dir.glob("clew-*.whl"))
+    if not wheels:
+        raise RuntimeError("no clew wheel found in dist/; run `uv build` first")
+    wheel: Path = wheels[-1]  # latest (always defined after the if-guard)
+    venv = Path(tempfile.mkdtemp(prefix=f"clew_e2e_{wheel.name}_"))
     subprocess.run(
         [sys.executable, "-m", "venv", str(venv)],
         check=True, capture_output=True,
     )
     py = venv / "bin" / "python"
-    # Install the wheel and the mcp extra
-    wheel = Path(__file__).resolve().parent.parent / "dist" / "clew-1.1.3-py3-none-any.whl"
-    if not wheel.exists():
-        # Build it
-        subprocess.run(["uv", "build"], cwd=wheel.parent.parent, check=True, capture_output=True)
     subprocess.run(
         [str(py), "-m", "pip", "install", "--quiet", str(wheel), "mcp"],
         check=True, capture_output=True,

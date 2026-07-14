@@ -159,3 +159,6 @@ build/
 htmlcov/
 .coverage
 coverage.xml
+
+# Local release helper, not part of the repo
+RELEASE.txt

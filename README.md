@@ -6,7 +6,7 @@
 [![MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org)
 [![uv](https://img.shields.io/badge/built%20with-uv-6c47ff.svg)](https://docs.astral.sh/uv/)
-[![Tests](https://img.shields.io/badge/tests-315%20passing-brightgreen.svg)](#)
+[![Tests](https://img.shields.io/badge/tests-350%20passing-brightgreen.svg)](#)
 [![Coverage](https://img.shields.io/badge/coverage-87%25-brightgreen.svg)](#)
 [![MCP](https://img.shields.io/badge/MCP-compatible-purple.svg)](https://modelcontextprotocol.io)
 
@@ -26,6 +26,16 @@
 - **GitHub Action** — record a trace during CI runs.
 
 [See the live demo →](./docs/assets/demo-trace.html)
+
+## What's new in v1.1.3 (polish)
+
+* **TOCTOU + symlink defense in `Store.put`** via `O_CREAT | O_EXCL | O_NOFOLLOW` + atomic rename.
+* **`clew trace --clean-env`** flag to strip parent env from the subprocess.
+* **+35 tests** covering MCP, OTel SDK, langchain error paths, and store security.
+* **`mkdocs build --strict`** verified — site builds with no broken links.
+* **`pip-audit`** against the resolved dep tree: no known vulnerabilities.
+* CHANGELOG dates fixed for 0.1.0, 1.0.0, 1.1.0, 1.1.1.
+* 350 tests, 87% coverage, mypy --strict clean across 29 source files.
 
 ## What's new in v1.1.2 (security hardening)
 

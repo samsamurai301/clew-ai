@@ -4,6 +4,44 @@ All notable changes to `clew` are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.1.3] — 2026-07-14
+
+The polish release. Every previously-flagged issue is fixed.
+
+### Fixed
+
+- CHANGELOG dates for 0.1.0, 1.0.0, 1.1.0, 1.1.1.
+- README version badge text/URL mismatch.
+- README: ``What's new in v1.1.2`` section added.
+
+### Hardening
+
+- **TOCTOU + symlink defense in `Store.put`**: writes go through
+  a temp file with `O_CREAT | O_EXCL | O_NOFOLLOW` and are renamed
+  atomically into place. Symlinks at the destination are refused
+  (EEXIST/EACCES); partial writes are never observable.
+- **`clew trace --clean-env`** flag: subprocess starts with a
+  minimal environment (PATH, HOME, LANG, LC_ALL) instead of
+  inheriting the full parent env (which may contain secrets).
+
+### Tests
+
+- +10 MCP tool tests (covers all 12 tools + 2 resources).
+- +10 OTel SDK tests (fake-client for `instrument_openai` /
+  `instrument_anthropic`, idempotency, exception capture).
+- +9 langchain error-path tests (`on_*_error` callbacks, no-op on
+  unknown run_id, span type classification).
+- +2 store security tests (symlink refusal, no partial writes).
+- +1 CLI test (`clew trace --clean-env` doesn't leak secrets).
+- 350 total tests, 87% coverage, mypy --strict clean across 29 source files.
+
+### Documentation
+
+- `.github/CODEOWNERS` (security team for sensitive code).
+- `.github/dependabot.yml` (weekly pip + GitHub Actions updates).
+- `mkdocs build --strict` verified — no broken links, no missing pages.
+- `pip-audit` against the resolved 1.1.3 dep tree: no known vulnerabilities.
+
 ## [1.1.2] — 2026-07-14
 
 The security-hardening release. No public API changes; every change

@@ -22,6 +22,7 @@ than ``PIPE_BUF`` on POSIX, which our one-line JSONL payloads are.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import threading
 from collections.abc import Iterator
@@ -30,6 +31,54 @@ from pathlib import Path
 
 from clew.core.models import Span
 from clew.utils.hash import span_hash
+
+#: Default mode for atomic file creation. ``O_CREAT | O_EXCL | O_NOFOLLOW``
+#: refuses to follow symlinks at the destination and fails (EEXIST) if
+#: the file already exists — a hard guarantee against TOCTOU races on
+#: shared filesystems. The mode bits ``0o600`` restrict read/write to
+#: the owner, the same default as ``pathlib.Path.open(mode='w')``.
+_ATOMIC_OPEN_FLAGS: int = (
+    os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_WRONLY | os.O_TRUNC
+)
+_ATOMIC_OPEN_MODE: int = 0o600
+
+
+class _atomic_open:
+    """Context manager that opens a file with TOCTOU-safe flags.
+
+    Wraps :func:`os.open` so that callers can write text (with
+    encoding) while still getting the security properties of
+    ``O_CREAT | O_EXCL | O_NOFOLLOW``. Windows is supported by
+    falling back to a plain ``path.open(mode='w')`` if the POSIX
+    flags aren't accepted (which is the platform default on
+    systems where :data:`os.O_NOFOLLOW` doesn't exist).
+    """
+
+    def __init__(self, path: Path, mode: str = "w", *, encoding: str = "utf-8") -> None:
+        self._path = path
+        self._mode = mode
+        self._encoding = encoding
+        self._fd: int | None = None
+        self._fp: object | None = None
+
+    def __enter__(self) -> object:
+        try:
+            fd = os.open(str(self._path), _ATOMIC_OPEN_FLAGS, _ATOMIC_OPEN_MODE)
+        except (AttributeError, ValueError):
+            # Windows or platform without O_NOFOLLOW — fall back.
+            self._fp = self._path.open(self._mode, encoding=self._encoding)
+            return self._fp
+        self._fd = fd
+        # os.fdopen returns a TextIOWrapper when mode='w' and encoding is given.
+        self._fp = os.fdopen(fd, self._mode, encoding=self._encoding)
+        return self._fp
+
+    def __exit__(self, *exc: object) -> None:
+        if self._fp is not None:
+            close = getattr(self._fp, "close", None)
+            if close is not None:
+                close()
+
 
 #: SQLite schema for the spans index. ``parent_ids`` is a JSON-encoded
 #: list of hex strings; ``started_at``/``ended_at`` are epoch seconds
@@ -195,10 +244,15 @@ class Store:
     def put(self, span: Span) -> str:
         """Append a span. Idempotent: a duplicate ``span.id`` is a no-op.
 
-        Returns ``span.id``. The JSONL file is opened in append mode
-        (``"a"``) so the underlying file pointer is always positioned at
-        end-of-file, and the dedup check (``path.exists()``) ensures we
-        never grow an existing span file.
+        Returns ``span.id``. The JSONL file is created with
+        ``O_CREAT | O_EXCL | O_NOFOLLOW`` and atomically renamed into
+        place. This closes the TOCTOU race where another process
+        (or a symlink in a shared directory) could swap the target
+        between the exists-check and the open call. The
+        ``O_NOFOLLOW`` flag refuses to follow a symlink at the
+        destination path; an attacker who can plant a symlink in
+        the spans/ directory cannot redirect the write to an
+        arbitrary file.
         """
         with self._lock:
             path = self._span_path(span.id)
@@ -207,9 +261,24 @@ class Store:
                 return span.id
             path.parent.mkdir(parents=True, exist_ok=True)
             line = self._serialize_span(span)
-            # Append mode — required by the storage protocol.
-            with path.open("a", encoding="utf-8") as fp:
-                fp.write(line + "\n")
+            # Write to a temp file with O_CREAT | O_EXCL | O_NOFOLLOW,
+            # then atomically rename. This is the canonical "atomic
+            # write" pattern: a concurrent process can't observe a
+            # half-written file, and a symlink at the destination is
+            # refused (EEXIST) rather than followed.
+            tmp_path = path.with_suffix(path.suffix + f".tmp.{span.id[:8]}")
+            try:
+                with _atomic_open(tmp_path, "w", encoding="utf-8") as fp:
+                    fp.write(line + "\n")  # type: ignore[attr-defined]
+                os.replace(tmp_path, path)  # atomic on POSIX
+            except BaseException:
+                # Best-effort cleanup of the temp file on any failure.
+                try:
+                    if tmp_path.exists():
+                        tmp_path.unlink()
+                except OSError:
+                    pass
+                raise
             with sqlite3.connect(self._db_path) as conn:
                 self._insert_index_row(conn, span)
                 conn.commit()

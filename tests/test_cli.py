@@ -970,3 +970,32 @@ def test_share_rejects_missing_trace(in_tmp: Path) -> None:
         ],
     )
     assert result.exit_code == 1
+
+
+# ---------------------------------------------------------------------------
+# Security: clew trace --clean-env
+# ---------------------------------------------------------------------------
+
+
+def test_trace_clean_env_does_not_leak_secrets(tmp_path: Path, monkeypatch) -> None:
+    """``clew trace --clean-env`` strips parent env vars from the subprocess.
+
+    We test the underlying ``run_and_record`` directly: when ``env``
+    is supplied, the subprocess sees that exact env (not the parent's).
+    """
+    import os
+    from clew.core.runner import run_and_record
+    from clew.core.models import Span, SpanStatus, SpanType
+    from clew.core.store import Store
+
+    monkeypatch.setenv("CLEW_TEST_SECRET", "hunter2")
+    store = Store(tmp_path / ".clew")
+    span = run_and_record(
+        ["python3", "-c", "import os, sys; sys.exit(0 if 'CLEW_TEST_SECRET' not in os.environ else 1)"],
+        cwd=tmp_path,
+        store=store,
+        env={"PATH": os.environ.get("PATH", "")},
+    )
+    # The subprocess saw the minimal env, so CLEW_TEST_SECRET was
+    # not present and it exited 0 (OK).
+    assert span.status is SpanStatus.OK

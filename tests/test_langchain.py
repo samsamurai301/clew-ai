@@ -142,3 +142,128 @@ def test_close_on_missing_run_id_is_safe(tmp_path: Path) -> None:
     """Closing a span we never opened is a no-op (defensive)."""
     cb, _ = _make_handler(tmp_path)
     cb.on_chain_end({}, run_id=uuid4())  # no start; should not raise
+
+
+# ---------------------------------------------------------------------------
+# Error path coverage
+# ---------------------------------------------------------------------------
+
+
+def test_chain_error_writes_error_span(tmp_path: Path) -> None:
+    """on_chain_error marks the span as ERROR with the message."""
+    cb, t = _make_handler(tmp_path)
+    run_id = uuid4()
+    cb.on_chain_start(
+        {"name": "FailChain"},
+        {"input": "x"},
+        run_id=run_id,
+    )
+    cb.on_chain_error(RuntimeError("boom"), run_id=run_id)
+    spans = list(t._store.store.iter_spans())
+    assert len(spans) == 1
+    assert spans[0].name == "FailChain"
+    assert spans[0].status.value == "ERROR"
+    assert "boom" in (spans[0].error or "")
+
+
+def test_chain_end_with_no_start_is_noop(tmp_path: Path) -> None:
+    """on_chain_end for an unknown run_id is silently ignored."""
+    cb, t = _make_handler(tmp_path)
+    cb.on_chain_end({"output": "y"}, run_id=uuid4())
+    spans = list(t._store.store.iter_spans())
+    assert spans == []
+
+
+def test_chain_error_with_no_start_is_noop(tmp_path: Path) -> None:
+    """on_chain_error for an unknown run_id is silently ignored."""
+    cb, t = _make_handler(tmp_path)
+    cb.on_chain_error(RuntimeError("x"), run_id=uuid4())
+    spans = list(t._store.store.iter_spans())
+    assert spans == []
+
+
+def test_llm_error_writes_error_span(tmp_path: Path) -> None:
+    """on_llm_error marks the LLM span as ERROR."""
+    cb, t = _make_handler(tmp_path)
+    run_id = uuid4()
+    cb.on_llm_start(
+        {"name": "OpenAI"},
+        ["prompt"],
+        run_id=run_id,
+    )
+    cb.on_llm_error(RuntimeError("rate-limited"), run_id=run_id)
+    spans = list(t._store.store.iter_spans())
+    assert len(spans) == 1
+    assert spans[0].name == "OpenAI"
+    assert spans[0].status.value == "ERROR"
+    assert "rate-limited" in (spans[0].error or "")
+
+
+def test_llm_error_with_no_start_is_noop(tmp_path: Path) -> None:
+    """on_llm_error for an unknown run_id is silently ignored."""
+    cb, t = _make_handler(tmp_path)
+    cb.on_llm_error(RuntimeError("x"), run_id=uuid4())
+    assert list(t._store.store.iter_spans()) == []
+
+
+def test_llm_end_with_no_start_is_noop(tmp_path: Path) -> None:
+    """on_llm_end for an unknown run_id is silently ignored."""
+    cb, t = _make_handler(tmp_path)
+    cb.on_llm_end("ok", run_id=uuid4())
+    assert list(t._store.store.iter_spans()) == []
+
+
+def test_tool_error_writes_error_span(tmp_path: Path) -> None:
+    """on_tool_error marks the tool span as ERROR."""
+    cb, t = _make_handler(tmp_path)
+    run_id = uuid4()
+    cb.on_tool_start(
+        {"name": "search"},
+        "query",
+        run_id=run_id,
+    )
+    cb.on_tool_error(RuntimeError("timeout"), run_id=run_id)
+    spans = list(t._store.store.iter_spans())
+    assert len(spans) == 1
+    assert spans[0].name == "search"
+    assert spans[0].status.value == "ERROR"
+    assert "timeout" in (spans[0].error or "")
+
+
+def test_tool_error_with_no_start_is_noop(tmp_path: Path) -> None:
+    """on_tool_error for an unknown run_id is silently ignored."""
+    cb, t = _make_handler(tmp_path)
+    cb.on_tool_error(RuntimeError("x"), run_id=uuid4())
+    assert list(t._store.store.iter_spans()) == []
+
+
+def test_tool_end_with_no_start_is_noop(tmp_path: Path) -> None:
+    """on_tool_end for an unknown run_id is silently ignored."""
+    cb, t = _make_handler(tmp_path)
+    cb.on_tool_end("result", run_id=uuid4())
+    assert list(t._store.store.iter_spans()) == []
+
+
+# ---------------------------------------------------------------------------
+# Span type classification
+# ---------------------------------------------------------------------------
+
+
+def test_classify_openai_llm(tmp_path: Path) -> None:
+    """on_llm_start with 'OpenAI' is LLM."""
+    cb, t = _make_handler(tmp_path)
+    rid = uuid4()
+    cb.on_llm_start({"name": "OpenAI"}, ["p"], run_id=rid)
+    cb.on_llm_end("ok", run_id=rid)
+    span = next(t._store.store.iter_spans())
+    assert span.type.value == "LLM"
+
+
+def test_classify_empty_serialized_is_observation(tmp_path: Path) -> None:
+    """No serialized name falls back to OBSERVATION."""
+    cb, t = _make_handler(tmp_path)
+    rid = uuid4()
+    cb.on_chain_start({}, {"x": 1}, run_id=rid)
+    cb.on_chain_end({"y": 2}, run_id=rid)
+    span = next(t._store.store.iter_spans())
+    assert span.type.value == "OBSERVATION"

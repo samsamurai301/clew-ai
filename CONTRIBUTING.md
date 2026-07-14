@@ -109,3 +109,10 @@ handle it.
 
 This project follows the [Contributor Covenant](https://www.contributor-covenant.org/).
 Be kind. Assume good faith. Focus on the code, not the person.
+
+
+## Security
+
+See [SECURITY.md](SECURITY.md) for our security policy, supported
+versions, and how to report a vulnerability. **Please do not open
+a public GitHub issue for security reports.**

@@ -134,6 +134,18 @@ def cmd_trace(
         "--timeout",
         help="Max seconds to wait before killing the process.",
     ),
+    inherit_env: bool = typer.Option(
+        True,
+        "--inherit-env/--clean-env",
+        help=(
+            "By default the subprocess inherits the full parent "
+            "environment. Pass ``--clean-env`` to start with a "
+            "minimal environment (just PATH, HOME, LANG, and the "
+            "current shell's vars). Use ``--clean-env`` when the "
+            "subprocess might leak secrets via env (``os.environ``) "
+            "or via tail-of-stderr that includes the environment."
+        ),
+    ),
     root: Path = typer.Option(None, "--root", help="Path to the .clew directory."),
 ) -> None:
     """Run a subprocess and record it as a single span.
@@ -145,16 +157,37 @@ def cmd_trace(
     Example:
 
         clew trace -- python my_agent.py
+
+    Security: the subprocess inherits the full parent environment
+    by default (including any secrets in ``os.environ``). The
+    resulting span's ``attributes.argv`` and ``attributes.stdout_tail``
+    are stored unredacted in the store. For sensitive workflows,
+    use ``--clean-env`` and pipe the trace into a private branch:
+
+        clew trace --clean-env -- python -c "print('ok')"
     """
     if not argv:
         _err("`clew trace` requires a command after `--`")
     clew_path = _resolve_root(root)
     store = Store(clew_path)
+    env = None
+    if not inherit_env:
+        # Minimal safe environment: only the variables that almost
+        # every command needs. Users who need more should pass
+        # ``--inherit-env`` and clear the variables they don't want.
+        import os
+        env = {
+            "PATH": os.environ.get("PATH", ""),
+            "HOME": os.environ.get("HOME", ""),
+            "LANG": os.environ.get("LANG", "C.UTF-8"),
+            "LC_ALL": os.environ.get("LC_ALL", "C.UTF-8"),
+        }
     span = run_and_record(
         argv,
         cwd=Path.cwd(),
         store=store,
         name=name,
+        env=env,
         timeout_s=timeout,
     )
     typer.echo(span.id)

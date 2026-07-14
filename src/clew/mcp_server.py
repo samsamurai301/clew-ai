@@ -570,12 +570,13 @@ def build_server() -> Server:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Run the MCP server on stdio. Returns the process exit code."""
-    parser = argparse.ArgumentParser(
-        prog="clew-mcp",
-        description="Run the clew MCP server (stdio transport).",
-    )
-    parser.parse_args(argv)
+    """Run the MCP server on stdio. Returns the process exit code.
+
+    argv is accepted for API symmetry with other clew entry
+    points but currently has no options. The MCP server takes no
+    command-line arguments; the clew root is communicated through
+    the per-request root parameter to each tool call.
+    """
 
     async def _run() -> None:
         server = build_server()

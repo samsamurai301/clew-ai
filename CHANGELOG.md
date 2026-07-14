@@ -4,6 +4,55 @@ All notable changes to `clew` are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.1.4] — 2026-07-14
+
+The verification release. Every previously-flagged issue is fixed and
+real end-to-end behavior is now under test.
+
+### Fixed
+
+- **`clew mcp` failed to start via stdio**: the inner argparse was
+  picking up ``["mcp"]`` (the subcommand token) from ``sys.argv``
+  and bailing with ``unrecognized arguments: mcp``. ``main()`` no
+  longer parses argv; the MCP server takes no command-line args
+  (the store root is communicated per-request via the ``root``
+  tool argument).
+- **CLI error reporting for ValueError on `clew branch`**: branch
+  names containing ``/``, ``..``, NUL, or control characters
+  used to crash with a Python traceback. Now they print a clean
+  ``error: invalid branch name: ...`` and exit non-zero.
+
+### Tests
+
+- **+11 end-to-end tests** in ``tests/test_e2e_cli.py``:
+  - ``test_e2e_version``, ``test_e2e_init_record_log``,
+    ``test_e2e_show_and_html``, ``test_e2e_export_and_otel_import``,
+    ``test_e2e_keygen_share_verify``, ``test_e2e_branch_checkout_replay_diff``,
+    ``test_e2e_doctor_gc_query``, ``test_e2e_trace_clean_env``,
+    ``test_e2e_mcp_stdio_roundtrip``,
+    ``test_e2e_otel_roundtrip``,
+    ``test_e2e_bundle_tamper_detected``.
+  - Each test builds the wheel in a fresh venv, installs it, and
+    exercises the CLI via real subprocess invocations.
+  - The MCP test does a real JSON-RPC stdio roundtrip
+    (initialize, list tools, call list_traces / doctor, read
+    ``store://info`` and ``trace://<id>``).
+  - The bundle-tamper test modifies a span in the tar and
+    confirms ``clew verify`` reports the mismatch.
+- Marked with ``@pytest.mark.e2e`` and excluded from the
+  default run; opt in with ``pytest -m e2e``.
+
+### Inventory
+
+- 361 unit tests (up from 350), 11 e2e tests.
+- 86.90% line coverage on the unit suite; full CLI/MCP surface
+  is now covered end-to-end.
+- ``mypy --strict`` clean across 29 source files.
+- ``ruff check`` clean.
+- ``mkdocs build --strict`` clean.
+- ``pip-audit`` against the resolved dep tree: no known vulnerabilities.
+- ``uv lock --check`` and ``uv sync --frozen`` succeed.
+
 ## [1.1.3] — 2026-07-14
 
 The polish release. Every previously-flagged issue is fixed.

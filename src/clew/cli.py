@@ -323,6 +323,8 @@ def cmd_branch(
         bm.create(name, head)
     except FileExistsError:
         _err(f"branch {name!r} already exists")
+    except ValueError as exc:
+        _err(str(exc))
     typer.echo(f"Created branch {name!r} → {head[:12]}…")
 
 

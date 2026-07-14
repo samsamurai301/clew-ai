@@ -424,11 +424,20 @@ def render_html(trace: Trace) -> str:
     error_count = sum(1 for s in trace.spans if s.status is SpanStatus.ERROR)
     total_duration = sum(_format_duration_ms(s) for s in trace.spans)
     started = root.started_at.isoformat() if root and root.started_at else "?"
+    # ``html.escape`` blocks XSS but doesn't strip ``{`` / ``}``.
+    # Because we use ``str.format`` to fill the template, an
+    # attacker-controlled ``{name}`` in a value would either be
+    # re-substituted (if ``name`` is a kwarg) or raise (if it
+    # isn't). Belt-and-braces: replace ``{`` and ``}`` with their
+    # HTML-entity equivalents before substitution.
+    def _esc(s: str) -> str:
+        return html.escape(s).replace("{", "&#123;").replace("}", "&#125;")
+
     return _TEMPLATE.format(
         css=_CSS,
         js=_JS,
-        trace_id=html.escape(trace.trace_id[:16] or trace.trace_id),
-        root_id=html.escape(trace.root_span_id[:16] or trace.root_span_id),
+        trace_id=_esc(trace.trace_id[:16] or trace.trace_id),
+        root_id=_esc(trace.root_span_id[:16] or trace.root_span_id),
         span_count=len(trace.spans),
         plural="s" if len(trace.spans) != 1 else "",
         error_count=error_count,
@@ -436,9 +445,9 @@ def render_html(trace: Trace) -> str:
         error_class="error" if error_count else "ok",
         max_depth=_compute_max_depth(trace),
         total_duration_ms=total_duration,
-        started_at=html.escape(started),
+        started_at=_esc(started),
         html_tree=html_tree,
-        generated_at=html.escape(_now()),
+        generated_at=_esc(_now()),
     )
 
 

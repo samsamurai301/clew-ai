@@ -119,7 +119,10 @@ def cmd_trace(
     argv: list[str] = typer.Argument(
         ...,
         help="Command to run, e.g. `clew trace -- python my_agent.py`. "
-        "Everything after `--` is the command.",
+        "Everything after `--` is the command. "
+        "The command's argv, exit code, and tail of stdout/stderr "
+        "are recorded in the resulting span — do not pass commands "
+        "that read or print secrets.",
     ),
     name: str | None = typer.Option(
         None,

@@ -260,3 +260,33 @@ def test_iter_traces(store: Store) -> None:
 def test_iter_traces_empty(store: Store) -> None:
     """An empty store yields no trace ids."""
     assert list(store.iter_traces()) == []
+
+
+# ---------------------------------------------------------------------------
+# Security: span id validation
+# ---------------------------------------------------------------------------
+
+
+def test_span_path_rejects_path_traversal(tmp_path: Path) -> None:
+    """Span ids that escape the spans/ dir are rejected."""
+    store = Store(tmp_path / ".clew")
+    for bad in ["../../etc/passwd", "../foo", "foo/bar", "", "abc"]:
+        with pytest.raises(ValueError, match="(invalid span id|span id length)"):
+            store._span_path(bad)
+
+
+def test_span_path_rejects_non_hex(tmp_path: Path) -> None:
+    """Span ids must be lowercase hex."""
+    store = Store(tmp_path / ".clew")
+    for bad in ["xyz12345", "ABCDEF12", "12345g"]:
+        with pytest.raises(ValueError, match="invalid span id"):
+            store._span_path(bad)
+
+
+def test_span_path_accepts_valid_hex(tmp_path: Path) -> None:
+    """A valid 32 or 64 char hex id is accepted."""
+    store = Store(tmp_path / ".clew")
+    p = store._span_path("ab" * 16)
+    assert p.name == ("ab" * 16) + ".jsonl"
+    p = store._span_path("cd" * 32)
+    assert p.name == ("cd" * 32) + ".jsonl"

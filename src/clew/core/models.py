@@ -136,16 +136,18 @@ class Span(BaseModel):
     id: str = Field(
         ...,
         description=(
-            "SHA-256 hex (64 lowercase chars) of the canonical-JSON "
+            "Lowercase hex (8-64 chars) of the canonical-JSON "
             "serialization of this span with the `id` field removed. "
             "Computed by `clew.utils.hash.content_hash`; the storage "
-            "layer is responsible for setting it before write."
+            "layer is responsible for setting it before write. The "
+            "store layer also enforces the format — any non-hex "
+            "id is rejected before it can reach the filesystem."
         ),
     )
     trace_id: str = Field(
         ...,
         description=(
-            "SHA-256 hex of the root span of the trace this span "
+            "Lowercase hex of the root span of the trace this span "
             "belongs to. Constant for every span in a trace."
         ),
     )

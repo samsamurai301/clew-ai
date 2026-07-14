@@ -147,3 +147,62 @@ def test_write_html_self_contained(tmp_path: Path) -> None:
     assert "https://" not in text or "github.com/clew" in text
     # The github.com link in the footer is the only external reference, and
     # it's just an attribution.
+
+
+# ---------------------------------------------------------------------------
+# Security: HTML/JS injection defense
+# ---------------------------------------------------------------------------
+
+
+def test_html_report_escapes_format_braces_in_trace_id() -> None:
+    """A trace id containing ``{name}`` cannot break the template."""
+    from datetime import UTC, datetime
+    span = Span(
+        id="a" * 32,
+        trace_id="x" * 32,
+        parent_ids=[],
+        type=SpanType.OBSERVATION,
+        name="x",
+        started_at=datetime(2024, 1, 1, tzinfo=UTC),
+        ended_at=datetime(2024, 1, 1, tzinfo=UTC),
+        status=SpanStatus.OK,
+    )
+    # Trace with a hostile trace_id
+    trace = Trace(
+        trace_id="{trace_id}",  # attempts to re-substitute
+        root_span_id="a" * 32,
+        spans=[span],
+    )
+    # Must not raise and must produce a safe document
+    out = render_html(trace)
+    # The {trace_id} literal in the original template is replaced by
+    # the escaped value, so we should see the encoded form
+    # &#123;trace_id&#125; somewhere in the output.
+    assert "&#123;trace_id&#125;" in out
+    # And the unescaped literal should NOT appear.
+    import re
+    # The literal {trace_id} outside the template placeholders
+    # would be in the substituted value. We check the <title>:
+    title = re.search(r"<title>(.*?)</title>", out)
+    assert title is not None
+    assert title.group(1) == "clew trace &#123;trace_id&#125;"
+
+
+def test_html_report_escapes_html_in_name() -> None:
+    """Span names with HTML are escaped, not interpreted."""
+    from datetime import UTC, datetime
+    span = Span(
+        id="a" * 32,
+        trace_id="x" * 32,
+        parent_ids=[],
+        type=SpanType.OBSERVATION,
+        name='<script>alert(1)</script>',
+        started_at=datetime(2024, 1, 1, tzinfo=UTC),
+        ended_at=datetime(2024, 1, 1, tzinfo=UTC),
+        status=SpanStatus.OK,
+    )
+    trace = Trace(trace_id="x" * 32, root_span_id="a" * 32, spans=[span])
+    out = render_html(trace)
+    # The literal <script> must be escaped to &lt;script&gt;
+    assert "<script>alert" not in out
+    assert "&lt;script&gt;alert" in out

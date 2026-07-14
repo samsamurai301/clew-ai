@@ -160,7 +160,17 @@ class Store:
     # -- span path helpers ------------------------------------------------
 
     def _span_path(self, span_id: str) -> Path:
-        """Return the on-disk path for ``span_id`` (does not check existence)."""
+        """Return the on-disk path for ``span_id`` (does not check existence).
+
+        Raises :class:`ValueError` if ``span_id`` is not a valid hex
+        digest. This blocks path traversal: a span id of
+        ``../../etc/passwd`` would otherwise resolve to a path outside
+        the spans/ directory.
+        """
+        if not span_id or not all(c in "0123456789abcdef" for c in span_id):
+            raise ValueError(f"invalid span id: {span_id!r}")
+        if not (8 <= len(span_id) <= 64):
+            raise ValueError(f"span id length out of range: {len(span_id)}")
         return self._spans_dir / span_id[:2] / f"{span_id}.jsonl"
 
     @staticmethod

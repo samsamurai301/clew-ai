@@ -50,7 +50,10 @@ def run_and_record(
     span_name = name or Path(argv[0]).name or "subprocess"
     # Build a deterministic hash from the stable parts.
     sentinel = datetime(1970, 1, 1, tzinfo=UTC)
-    partial = Span(
+    # ``model_construct`` skips validation — we explicitly want the
+    # empty id here, since we set the real id from ``span_hash``
+    # below.
+    partial = Span.model_construct(
         id="",
         trace_id=uuid.uuid4().hex,  # fresh per run
         parent_ids=[],

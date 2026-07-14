@@ -15,7 +15,7 @@ Trace, branch, replay, and diff your agent runs — locally, content-addressed, 
 [![PyPI version](https://img.shields.io/pypi/v/clew.svg)](https://pypi.org/project/clew/)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
-[![Tests](https://img.shields.io/badge/tests-287%20passing-brightgreen.svg)](#)
+[![Tests](https://img.shields.io/badge/tests-315%20passing-brightgreen.svg)](#)
 [![Coverage](https://img.shields.io/badge/coverage-87%25-brightgreen.svg)](#)
 [![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://docs.astral.sh/ruff/)
 

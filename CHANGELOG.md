@@ -4,6 +4,49 @@ All notable changes to `clew` are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.1.2] — 2026-07-14
+
+The security-hardening release. No public API changes; every change
+is a defense against a known attack class.
+
+### Hardening
+
+- **Bundle extraction (CVE-2025-4138 / 4330 / 4517 / 7774)**:
+  `verify_bundle` and `extract_spans` now apply a strict allowlist
+  of tar member names. Bundles containing symlinks, hard links,
+  device files, FIFOs, absolute paths, `..` traversal, or names
+  with NUL/newline characters are refused. The decompressed size
+  is capped at 256MB and member count at 1M (both overridable).
+- **Span-id path traversal**: `Store._span_path` validates the id
+  is lowercase hex (8-64 chars) before resolving the on-disk
+  path. A span whose id contains `/`, `..`, or any non-hex char
+  cannot be persisted.
+- **Branch name hardening**: `BranchManager._ref_path` rejects
+  names with `/`, `\`, NUL, control characters, or leading `.`
+  (which would hide from `ls`). `BranchManager.list()` refuses
+  to follow symlinks in `refs/`. `current()` validates the
+  contents of `HEAD` against the same rules.
+- **HTML report XSS defense**: `render_html` now HTML-entity-
+  encodes `{` and `}` in user-supplied values, blocking an
+  attack that re-substitutes template placeholders.
+- **NDJSON bomb defense**: `import_ndjson` and `read_ndjson`
+  enforce a 64MB cap on input size and a 1M cap on span count.
+- **Tarball member hygiene**: bundle `TarInfo` entries have
+  `uid`, `gid`, `uname`, `gname` zeroed so a tampered tar
+  cannot impersonate a privileged owner.
+
+### Documentation
+
+- **`SECURITY.md`** (new): threat model, hardening checklist,
+  supported-versions table, and credits.
+
+### Tests
+
+- 25 new security-focused tests covering the bundle allowlist,
+  branch name validation, span id path traversal, subprocess
+  argv handling, HTML template escaping, and NDJSON bomb
+  defense. 315 total tests, 87% coverage, mypy --strict clean.
+
 ## [1.1.0] — 2026-XX-XX
 
 The ecosystem release. `clew` now ships integrations for the

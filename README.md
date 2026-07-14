@@ -2,11 +2,11 @@
 
 > **git for AI reasoning.** Trace, branch, replay, and diff your agent runs — locally, content-addressed, with a portable bundle format.
 
-[![1.1.1](https://img.shields.io/badge/version-1.1.1-blue.svg)]()
+[![1.1.1](https://img.shields.io/badge/version-1.1.2-blue.svg)]()
 [![MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org)
 [![uv](https://img.shields.io/badge/built%20with-uv-6c47ff.svg)](https://docs.astral.sh/uv/)
-[![Tests](https://img.shields.io/badge/tests-287%20passing-brightgreen.svg)](#)
+[![Tests](https://img.shields.io/badge/tests-315%20passing-brightgreen.svg)](#)
 [![Coverage](https://img.shields.io/badge/coverage-87%25-brightgreen.svg)](#)
 [![MCP](https://img.shields.io/badge/MCP-compatible-purple.svg)](https://modelcontextprotocol.io)
 
@@ -27,6 +27,15 @@
 
 [See the live demo →](./docs/assets/demo-trace.html)
 
+## What's new in v1.1.2 (security hardening)
+
+* **Bundle extraction defense-in-depth** (CVE-2025-4138/4330/4517/7774). Strict member allowlist; symlinks, hard links, `..` traversal, absolute paths, and NUL/newline names are refused. 256MB size cap, 1M member cap.
+* **Span-id path traversal blocked**. `Store._span_path` rejects any non-lowercase-hex id.
+* **Branch name hardening**. Control characters, leading `.`, and symlinks in `refs/` are rejected.
+* **HTML report XSS defense**. `{` and `}` in user-supplied values are HTML-entity-encoded.
+* **NDJSON bomb defense**. 64MB / 1M-span caps on `import_ndjson` and `read_ndjson`.
+* **`SECURITY.md`** with threat model, hardening checklist, and supported-versions table.
+* 315 tests, 87% coverage, mypy --strict clean.
 
 ## What's new in v1.1.1
 

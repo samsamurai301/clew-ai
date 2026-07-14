@@ -70,9 +70,18 @@ class BranchManager:
         """Return the on-disk path for a named ref file.
 
         Raises :class:`ValueError` if ``name`` contains path
-        separators or is otherwise unsafe.
+        separators, control characters, or anything that could
+        escape the refs directory.
         """
-        if not name or name in {".", ".."} or "/" in name or "\\" in name or "\0" in name:
+        if not name or name in {".", ".."}:
+            raise ValueError(f"invalid branch name: {name!r}")
+        if "/" in name or "\\" in name or "\0" in name:
+            raise ValueError(f"invalid branch name: {name!r}")
+        if any(ord(c) < 0x20 or ord(c) == 0x7f for c in name):
+            raise ValueError(f"invalid branch name: {name!r}")
+        if name.startswith("."):
+            # Refuse hidden files — they'd never be on the allowlist
+            # and would hide from `ls` / `clew branches`.
             raise ValueError(f"invalid branch name: {name!r}")
         return self._refs_dir / name
 
@@ -111,8 +120,32 @@ class BranchManager:
         return Branch(name=name, head_span_id=head_span_id, created_at=datetime.now(UTC))
 
     def list(self) -> list[Branch]:
-        """Return all branches sorted by name."""
-        names = sorted(p.name for p in self._refs_dir.iterdir() if p.is_file() and not p.name.endswith(".tmp"))
+        """Return all branches sorted by name.
+
+        Symlinks and other non-regular files are silently skipped
+        — they are never on the ref allowlist and following them
+        could be a symlink-attack vector.
+        """
+        names: list[str] = []
+        for p in self._refs_dir.iterdir():
+            # ``is_file`` follows symlinks; we want to refuse them.
+            try:
+                if p.is_symlink():
+                    continue
+            except OSError:
+                continue
+            if not p.is_file():
+                continue
+            if p.name.endswith(".tmp"):
+                continue
+            # Validate the name — if it's not a safe branch name, we
+            # shouldn't expose it via the public API.
+            try:
+                self._ref_path(p.name)
+            except ValueError:
+                continue
+            names.append(p.name)
+        names.sort()
         return [
             Branch(name=n, head_span_id=self._read_ref(n), created_at=datetime.now(UTC))
             for n in names
@@ -131,8 +164,25 @@ class BranchManager:
         path.unlink()
 
     def current(self) -> str:
-        """Return the name of the currently checked-out branch."""
-        return self._head_path.read_text(encoding="utf-8").strip()
+        """Return the name of the currently checked-out branch.
+
+        Raises :class:`ValueError` if ``HEAD`` is missing or contains
+        a malformed name. The latter can happen if a user hand-edits
+        ``HEAD`` to garbage; the doctor reports this as ``empty-head``
+        or ``dangling-head``.
+        """
+        if not self._head_path.exists():
+            raise ValueError("HEAD is missing")
+        raw = self._head_path.read_text(encoding="utf-8").strip()
+        # Validate the name with the same rules as ``_ref_path`` so a
+        # poisoned HEAD can't trick callers into reading a non-ref.
+        if not raw:
+            raise ValueError("HEAD is empty")
+        if "/" in raw or "\\" in raw or "\0" in raw:
+            raise ValueError(f"HEAD contains invalid branch name: {raw!r}")
+        if any(ord(c) < 0x20 or ord(c) == 0x7f for c in raw):
+            raise ValueError(f"HEAD contains invalid branch name: {raw!r}")
+        return raw
 
     def checkout(self, name: str) -> None:
         """Switch ``HEAD`` to ``name``. Raises :class:`KeyError` if missing."""

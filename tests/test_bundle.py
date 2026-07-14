@@ -253,7 +253,12 @@ def test_verify_fails_on_span_content_tamper(
 
 
 def test_verify_fails_on_missing_manifest(tmp_path: Path) -> None:
-    """A tarball without manifest.json is rejected."""
+    """A tarball with no manifest.json is rejected.
+
+    We test two variants: a tarball that contains only a
+    disallowed member (rejected by the allowlist), and a tarball
+    that is empty (rejected as "missing manifest").
+    """
     priv, pub = generate_keypair()
     bad = tmp_path / "b.tgz"
     with tarfile.open(bad, "w:gz") as tar:
@@ -263,7 +268,16 @@ def test_verify_fails_on_missing_manifest(tmp_path: Path) -> None:
         tar.addfile(info, io.BytesIO(body))
     v = verify_bundle(bad, load_public_key(_bytes_to_tmpfile(pub)))
     assert v.valid is False
-    assert "missing" in (v.reason or "").lower()
+    # Either rejection reason is acceptable; the bundle must not pass.
+    assert v.reason is not None
+
+    # An empty tarball: also rejected as "missing".
+    empty = tmp_path / "empty.tgz"
+    with tarfile.open(empty, "w:gz") as tar:
+        pass
+    v2 = verify_bundle(empty, load_public_key(_bytes_to_tmpfile(pub)))
+    assert v2.valid is False
+    assert "missing" in (v2.reason or "").lower()
 
 
 def test_verify_fails_on_corrupt_tar(tmp_path: Path) -> None:
@@ -387,3 +401,137 @@ def test_spans_sha256_cross_check_round_trip(
     for s in spans:
         h.update(s.model_dump_json().encode("utf-8"))
     assert result.manifest["spans_sha256"] == h.hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# Security hardening tests (CVE-2025-4138 / 4330 / 4517 / 7774 family)
+# ---------------------------------------------------------------------------
+
+
+def test_bundle_rejects_symlink_member(tmp_path: Path) -> None:
+    """Bundles must not contain symlinks (CVE-2025-4330)."""
+    bad = tmp_path / "b.tgz"
+    with tarfile.open(bad, "w:gz") as tar:
+        # Create a symlink to /etc/passwd
+        info = tarfile.TarInfo(name="evil")
+        info.type = tarfile.SYMTYPE
+        info.linkname = "/etc/passwd"
+        tar.addfile(info)
+    _, pub = generate_keypair()
+    v = verify_bundle(bad, load_public_key(_bytes_to_tmpfile(pub)))
+    assert v.valid is False
+    assert "disallowed" in (v.reason or "").lower() or "link" in (v.reason or "").lower()
+
+
+def test_bundle_rejects_path_traversal_member(tmp_path: Path) -> None:
+    """Bundles must not contain members with .. in the path."""
+    bad = tmp_path / "b.tgz"
+    with tarfile.open(bad, "w:gz") as tar:
+        info = tarfile.TarInfo(name="spans/../../etc/passwd")
+        info.size = 5
+        tar.addfile(info, io.BytesIO(b"hello"))
+    _, pub = generate_keypair()
+    v = verify_bundle(bad, load_public_key(_bytes_to_tmpfile(pub)))
+    assert v.valid is False
+
+
+def test_bundle_rejects_absolute_path_member(tmp_path: Path) -> None:
+    """Bundles must not contain absolute paths."""
+    bad = tmp_path / "b.tgz"
+    with tarfile.open(bad, "w:gz") as tar:
+        info = tarfile.TarInfo(name="/etc/passwd")
+        info.size = 5
+        tar.addfile(info, io.BytesIO(b"hello"))
+    _, pub = generate_keypair()
+    v = verify_bundle(bad, load_public_key(_bytes_to_tmpfile(pub)))
+    assert v.valid is False
+
+
+def test_bundle_rejects_hardlink_member(tmp_path: Path) -> None:
+    """Bundles must not contain hard links."""
+    bad = tmp_path / "b.tgz"
+    with tarfile.open(bad, "w:gz") as tar:
+        info = tarfile.TarInfo(name="manifest.json")
+        info.size = 5
+        tar.addfile(info, io.BytesIO(b"hello"))
+        link = tarfile.TarInfo(name="hard")
+        link.type = tarfile.LNKTYPE
+        link.linkname = "manifest.json"
+        tar.addfile(link)
+    _, pub = generate_keypair()
+    v = verify_bundle(bad, load_public_key(_bytes_to_tmpfile(pub)))
+    assert v.valid is False
+
+
+def test_bundle_rejects_oversized(tmp_path: Path) -> None:
+    """Bundles that exceed the byte cap are rejected."""
+    bad = tmp_path / "b.tgz"
+    # Use a fake span id (32-char hex) with a large declared size
+    fake_id = "ab" * 16
+    with tarfile.open(bad, "w:gz") as tar:
+        info = tarfile.TarInfo(name=f"spans/{fake_id}.json")
+        body = b"x" * 200
+        info.size = len(body)
+        tar.addfile(info, io.BytesIO(body))
+        info2 = tarfile.TarInfo(name=f"spans/{'cd' * 16}.json")
+        body2 = b"x" * 900
+        info2.size = len(body2)
+        tar.addfile(info2, io.BytesIO(body2))
+    _, pub = generate_keypair()
+    v = verify_bundle(bad, load_public_key(_bytes_to_tmpfile(pub)), max_total_bytes=512)
+    assert v.valid is False
+    assert "exceeds" in (v.reason or "").lower()
+
+
+def test_bundle_rejects_too_many_members(tmp_path: Path) -> None:
+    """Bundles with more than max_members members are rejected."""
+    bad = tmp_path / "b.tgz"
+    with tarfile.open(bad, "w:gz") as tar:
+        for i in range(10):
+            info = tarfile.TarInfo(name=f"f{i}")
+            tar.addfile(info)
+    _, pub = generate_keypair()
+    v = verify_bundle(bad, load_public_key(_bytes_to_tmpfile(pub)), max_members=5)
+    assert v.valid is False
+    assert "members" in (v.reason or "").lower()
+
+
+def test_bundle_rejects_nul_in_member_name(tmp_path: Path) -> None:
+    """Member names with NUL bytes are rejected."""
+    bad = tmp_path / "b.tgz"
+    with tarfile.open(bad, "w:gz") as tar:
+        info = tarfile.TarInfo(name="ok\x00.evil")
+        info.size = 0
+        tar.addfile(info, io.BytesIO(b""))
+    _, pub = generate_keypair()
+    v = verify_bundle(bad, load_public_key(_bytes_to_tmpfile(pub)))
+    assert v.valid is False
+
+
+def test_build_rejects_malformed_span_id(tmp_path: Path) -> None:
+    """build_bundle refuses spans whose id contains path-traversal chars."""
+    priv, pub = generate_keypair()
+    bad_span = Span(
+        id="../../etc/passwd",
+        trace_id="0" * 32,
+        parent_ids=[],
+        type=SpanType.OBSERVATION,
+        name="x",
+        started_at=datetime(2024, 1, 1, tzinfo=UTC),
+        ended_at=datetime(2024, 1, 1, tzinfo=UTC),
+        status=SpanStatus.OK,
+    )
+    trace = Trace(
+        trace_id="0" * 32,
+        root_span_id="../../etc/passwd",
+        spans=[bad_span],
+    )
+    with pytest.raises(ValueError, match="non-canonical"):
+        build_bundle(
+            trace,
+            [bad_span],
+            out=tmp_path / "b.tgz",
+            source_store=tmp_path,
+            private_key=load_private_key(_bytes_to_tmpfile(priv)),
+            public_key=load_public_key(_bytes_to_tmpfile(pub)),
+        )

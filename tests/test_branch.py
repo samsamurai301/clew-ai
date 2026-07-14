@@ -13,6 +13,16 @@ from clew.core.trace import TraceStore
 from .conftest import make_span  # type: ignore[import-not-found]
 
 
+def _open_store(tmp_path: Path | None = None) -> tuple[Store, TraceStore]:
+    """Open a fresh store under tmp_path (or a fresh tempdir)."""
+    import tempfile
+    if tmp_path is None:
+        tmp_path = Path(tempfile.mkdtemp())
+    store_path = tmp_path / ".clew"
+    s = Store(store_path)
+    return s, TraceStore(s)
+
+
 def _setup(tmp_path: Path) -> tuple[BranchManager, TraceStore]:
     store = Store(tmp_path)
     ts = TraceStore(store)
@@ -136,3 +146,68 @@ def test_checkout_missing_raises(tmp_path: Path) -> None:
     bm, _ = _setup(tmp_path)
     with pytest.raises(KeyError):
         bm.checkout("nope")
+
+
+# ---------------------------------------------------------------------------
+# Security: branch name validation
+# ---------------------------------------------------------------------------
+
+
+def test_branch_rejects_path_traversal(tmp_path: Path) -> None:
+    """Branch names with / or .. are rejected."""
+    store, ts = _open_store(tmp_path)
+    bm = BranchManager(ts)
+    for bad in ["foo/bar", "../etc", "..", "foo/../../bar", ".", "with\\backslash"]:
+        with pytest.raises(ValueError, match="invalid branch name"):
+            bm.create(bad, "0" * 32)
+
+
+def test_branch_rejects_control_chars(tmp_path: Path) -> None:
+    """Branch names with control characters or NUL are rejected."""
+    store, ts = _open_store(tmp_path)
+    bm = BranchManager(ts)
+    for bad in ["foo\x00bar", "foo\nbar", "foo\rbar", "foo\tbar"]:
+        with pytest.raises(ValueError, match="invalid branch name"):
+            bm.create(bad, "0" * 32)
+
+
+def test_branch_rejects_hidden_names(tmp_path: Path) -> None:
+    """Branch names starting with . are rejected (would hide from ls)."""
+    store, ts = _open_store(tmp_path)
+    bm = BranchManager(ts)
+    for bad in [".secret", "..hidden"]:
+        with pytest.raises(ValueError, match="invalid branch name"):
+            bm.create(bad, "0" * 32)
+
+
+def test_branch_list_skips_symlinks(tmp_path: Path) -> None:
+    """BranchManager.list() refuses to follow symlinks in refs/."""
+    import os
+    store_path = tmp_path / ".clew"
+    store = Store(store_path)
+    ts = TraceStore(store)
+    bm = BranchManager(ts)
+    bm.create("good", "0" * 32)
+    # Plant a symlink in refs/
+    link_path = store_path / "refs" / "evil"
+    target = tmp_path / "outside.txt"
+    target.write_text("x")
+    try:
+        os.symlink(str(target), str(link_path))
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not supported on this platform")
+    names = [b.name for b in bm.list()]
+    assert "good" in names
+    assert "evil" not in names
+
+
+def test_current_rejects_poisoned_head(tmp_path: Path) -> None:
+    """A HEAD file with control characters raises ValueError."""
+    store_path = tmp_path / ".clew"
+    store = Store(store_path)
+    ts = TraceStore(store)
+    bm = BranchManager(ts)
+    # Plant a poisoned HEAD
+    (store_path / "HEAD").write_text("bad/../etc\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="invalid branch name"):
+        bm.current()

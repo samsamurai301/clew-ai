@@ -291,14 +291,29 @@ def export_ndjson(trace_id: str, spans: Iterable[Span]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def import_ndjson(text: str) -> tuple[str, list[Span]]:
+#: Default cap on NDJSON input size (defense against zip/json bombs).
+#: 64MB is generous for a single trace; if you need more, pass
+#: ``max_bytes`` to :func:`import_ndjson`.
+DEFAULT_MAX_NDJSON_BYTES: int = 64 * 1024 * 1024
+
+
+def import_ndjson(
+    text: str,
+    *,
+    max_bytes: int = DEFAULT_MAX_NDJSON_BYTES,
+    max_spans: int = 1_000_000,
+) -> tuple[str, list[Span]]:
     """Parse an NDJSON trace file back into ``(trace_id, [Span])``.
 
     Accepts both clew's wrapped form (with a leading ``_kind: trace``
     header) and the bare OTel form (one OTel span dict per line, all
     sharing a ``trace_id``). Raises :class:`ValueError` on malformed
-    input.
+    input or if the input exceeds ``max_bytes`` / ``max_spans``.
     """
+    if len(text.encode("utf-8")) > max_bytes:
+        raise ValueError(
+            f"NDJSON input exceeds {max_bytes} bytes (use max_bytes to override)"
+        )
     trace_id: str | None = None
     spans: list[Span] = []
     for n, raw in enumerate(text.splitlines(), start=1):
@@ -320,6 +335,10 @@ def import_ndjson(text: str) -> tuple[str, list[Span]]:
             continue
         if kind is not None and kind != "span":
             raise ValueError(f"line {n}: unknown _kind {kind!r}")
+        if len(spans) >= max_spans:
+            raise ValueError(
+                f"NDJSON input has more than {max_spans} spans (use max_spans to override)"
+            )
         span = from_otel(obj)
         spans.append(span)
         if trace_id is None:
@@ -337,12 +356,26 @@ def write_ndjson(path: Path, trace_id: str, spans: Iterable[Span]) -> int:
     return text.count("\n") - 1  # minus the header line
 
 
-def read_ndjson(path: Path) -> tuple[str, list[Span]]:
-    """Read spans from an NDJSON file; returns ``(trace_id, [Span])``."""
-    return import_ndjson(path.read_text(encoding="utf-8"))
+def read_ndjson(
+    path: Path,
+    *,
+    max_bytes: int = DEFAULT_MAX_NDJSON_BYTES,
+    max_spans: int = 1_000_000,
+) -> tuple[str, list[Span]]:
+    """Read spans from an NDJSON file; returns ``(trace_id, [Span])``.
+
+    Enforces the same ``max_bytes`` / ``max_spans`` caps as
+    :func:`import_ndjson` to refuse zip/json bombs.
+    """
+    if path.stat().st_size > max_bytes:
+        raise ValueError(
+            f"file {path} exceeds {max_bytes} bytes (use max_bytes to override)"
+        )
+    return import_ndjson(path.read_text(encoding="utf-8"), max_bytes=max_bytes, max_spans=max_spans)
 
 
 __all__ = [
+    "DEFAULT_MAX_NDJSON_BYTES",
     "export_ndjson",
     "from_otel",
     "import_ndjson",

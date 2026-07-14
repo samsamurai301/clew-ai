@@ -156,3 +156,62 @@ def test_export_preserves_parent_chain() -> None:
     _, got = import_ndjson(out)
     by_name = {s.name: s for s in got}
     assert by_name["child"].parent_ids == [root.id]
+
+
+# ---------------------------------------------------------------------------
+# Security: NDJSON bomb defense
+# ---------------------------------------------------------------------------
+
+
+def test_ndjson_rejects_oversized(tmp_path: Path) -> None:
+    """NDJSON input exceeding the byte cap is rejected before parsing."""
+    from clew.core.format import import_ndjson
+    big = "x" * 1000
+    with pytest.raises(ValueError, match="exceeds"):
+        import_ndjson(big, max_bytes=100)
+
+
+def test_ndjson_rejects_too_many_spans() -> None:
+    """NDJSON input with too many spans is rejected before parsing."""
+    from clew.core.format import import_ndjson
+    from datetime import UTC, datetime
+    from clew.core.models import Span, SpanType, SpanStatus
+    # Generate 100 spans
+    lines = []
+    for i in range(100):
+        span = Span(
+            id="a" * 32,
+            trace_id="b" * 32,
+            parent_ids=[],
+            type=SpanType.OBSERVATION,
+            name=f"s{i}",
+            started_at=datetime(2024, 1, 1, tzinfo=UTC),
+            ended_at=datetime(2024, 1, 1, tzinfo=UTC),
+            status=SpanStatus.OK,
+        )
+        # Use export to get proper format
+        from clew.core.format import export_ndjson
+    text = export_ndjson("b" * 32, [
+        Span(
+            id="a" * 32,
+            trace_id="b" * 32,
+            parent_ids=[],
+            type=SpanType.OBSERVATION,
+            name=f"s{i}",
+            started_at=datetime(2024, 1, 1, tzinfo=UTC),
+            ended_at=datetime(2024, 1, 1, tzinfo=UTC),
+            status=SpanStatus.OK,
+        )
+        for i in range(100)
+    ])
+    with pytest.raises(ValueError, match="max_spans"):
+        import_ndjson(text, max_spans=10)
+
+
+def test_read_ndjson_rejects_oversized_file(tmp_path: Path) -> None:
+    """read_ndjson enforces the size cap before reading the file."""
+    from clew.core.format import read_ndjson
+    big = tmp_path / "big.ndjson"
+    big.write_bytes(b"x" * 1000)
+    with pytest.raises(ValueError, match="exceeds"):
+        read_ndjson(big, max_bytes=100)

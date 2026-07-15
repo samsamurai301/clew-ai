@@ -24,8 +24,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import importlib
 import json
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -35,7 +35,6 @@ from rich.console import Console
 from clew.core.branch import BranchManager
 from clew.core.bundle import (
     build_bundle,
-    extract_spans,
     generate_keypair,
     load_private_key,
     load_public_key,
@@ -43,12 +42,20 @@ from clew.core.bundle import (
 )
 from clew.core.diff import diff as diff_traces
 from clew.core.diff import format_json as diff_format_json
+from clew.core.errors import ClewError
 from clew.core.format import read_ndjson, write_ndjson
-from clew.core.health import check_store, gc
+from clew.core.health import GC_MIN_AGE_SECONDS, check_store, gc
 from clew.core.html_report import write_html
 from clew.core.models import SpanStatus, SpanType
 from clew.core.query import QueryFilter, parse_metadata_spec, query
-from clew.core.replay import MockExecutor, ReplayEngine
+from clew.core.replay import (
+    MockExecutor,
+    RecordingExecutor,
+    ReplayContext,
+    ReplayEngine,
+    ReplayExecutor,
+    ReplayResult,
+)
 from clew.core.runner import run_and_record
 from clew.core.store import Store
 from clew.core.trace import TraceStore
@@ -67,7 +74,7 @@ def _version_callback(value: bool) -> None:
 #: The typer app. Configured as the entry point in pyproject.toml.
 app = typer.Typer(
     name="clew",
-    help="git for AI reasoning — trace, branch, replay, and diff your agent runs.",
+    help="A zero-server, Git-like what-if debugger for Python agent traces.",
     no_args_is_help=True,
     add_completion=False,
 )
@@ -86,6 +93,7 @@ def _root(
 ) -> None:
     """Top-level options shared by every subcommand."""
 
+
 #: Shared rich console for error reporting.
 _err_console = Console(stderr=True, style="red")
 
@@ -97,16 +105,23 @@ def _err(msg: str) -> NoReturn:
 
 
 def _resolve_root(path: Path | None) -> Path:
-    """Find a ``.clew`` directory under ``path`` (or cwd)."""
+    """Honor an explicit store path or discover one from the cwd."""
     from clew.utils.paths import clew_root
-    return clew_root(path or Path.cwd())
+
+    if path is not None:
+        return path.expanduser().resolve()
+    return clew_root(Path.cwd())
 
 
 def _open_store(root: Path) -> tuple[Store, TraceStore]:
     """Open the clew store at ``root`` or fail with a friendly error."""
     if not (root / "manifest.json").exists():
         _err(f"no clew store at {root}. run `clew init` first.")
-    return Store(root), TraceStore(Store(root))
+    try:
+        store = Store(root)
+    except ClewError as exc:
+        _err(str(exc))
+    return store, TraceStore(store)
 
 
 # ---------------------------------------------------------------------------
@@ -169,13 +184,14 @@ def cmd_trace(
     if not argv:
         _err("`clew trace` requires a command after `--`")
     clew_path = _resolve_root(root)
-    store = Store(clew_path)
+    store, _ = _open_store(clew_path)
     env = None
     if not inherit_env:
         # Minimal safe environment: only the variables that almost
         # every command needs. Users who need more should pass
         # ``--inherit-env`` and clear the variables they don't want.
         import os
+
         env = {
             "PATH": os.environ.get("PATH", ""),
             "HOME": os.environ.get("HOME", ""),
@@ -191,6 +207,11 @@ def cmd_trace(
         timeout_s=timeout,
     )
     typer.echo(span.id)
+    if span.status is SpanStatus.ERROR:
+        returncode = span.attributes.get("returncode")
+        if isinstance(returncode, int) and 1 <= returncode <= 255:
+            raise typer.Exit(code=returncode)
+        raise typer.Exit(code=124 if "timeout" in (span.error or "").lower() else 1)
 
 
 # ---------------------------------------------------------------------------
@@ -204,12 +225,10 @@ def cmd_init(
 ) -> None:
     """Initialize a new ``.clew/`` store in ``PATH`` (idempotent)."""
     target = path / ".clew"
-    target.mkdir(parents=True, exist_ok=True)
-    if not (target / "manifest.json").exists():
-        manifest = {"version": 1, "created_at": datetime.now(UTC).isoformat()}
-        (target / "manifest.json").write_text(
-            json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-        )
+    try:
+        Store(target)
+    except ClewError as exc:
+        _err(str(exc))
     typer.echo(f"Initialized clew store at {target}")
 
 
@@ -277,8 +296,7 @@ def cmd_show(
     html: Path = typer.Option(
         None,
         "--html",
-        help="Write a self-contained interactive HTML report. "
-        "Default: <trace_id>.html in cwd.",
+        help="Write a self-contained interactive HTML report. Default: <trace_id>.html in cwd.",
     ),
 ) -> None:
     """Show the span tree of a trace.
@@ -352,6 +370,7 @@ def cmd_branches(
         typer.echo("(no branches)")
         return
     from rich.table import Table
+
     table = Table()
     table.add_column("name", style="bold")
     table.add_column("head span", style="cyan")
@@ -386,27 +405,153 @@ def cmd_replay(
     trace_id: str = typer.Argument(..., help="Trace id to replay."),
     from_span: str = typer.Option(None, "--from", help="Replay from this span only."),
     executor_kind: str = typer.Option(
-        "mock", "--executor", help="Executor: 'mock' (re-uses outputs) or 'recording'."
+        "mock",
+        "--executor",
+        help="Executor: 'mock' or an importable 'module:function'.",
+    ),
+    branch_name: str | None = typer.Option(
+        None, "--branch", help="Create this branch at the replayed trace tip."
     ),
     root: Path = typer.Option(None, "--root", help="Path to the .clew directory."),
     as_json: bool = typer.Option(False, "--json", help="Emit JSON instead of plain text."),
 ) -> None:
     """Replay a trace, producing a new trace (original is untouched)."""
     store, ts = _open_store(_resolve_root(root))
-    ex = MockExecutor()
-    if executor_kind not in {"mock", "recording"}:
-        _err(f"unknown executor {executor_kind!r}")
+    ex: ReplayExecutor
+    if executor_kind == "mock":
+        ex = MockExecutor()
+    else:
+        module_name, separator, function_name = executor_kind.partition(":")
+        if not separator or not module_name or not function_name:
+            _err("executor must be 'mock' or an importable 'module:function'")
+        try:
+            module = importlib.import_module(module_name)
+            function = getattr(module, function_name)
+        except (ImportError, AttributeError) as exc:
+            _err(f"cannot load executor {executor_kind!r}: {exc}")
+        if not callable(function):
+            _err(f"executor {executor_kind!r} is not callable")
+        ex = RecordingExecutor(function)
     engine = ReplayEngine(ts, executor=ex)
 
-    async def _run() -> str:
-        result = await engine.replay(trace_id, from_span_id=from_span)
-        return result.trace_id
-
-    new_trace_id = asyncio.run(_run())
+    try:
+        result = asyncio.run(engine.replay(trace_id, from_span_id=from_span))
+    except (KeyError, ClewError, ValueError) as exc:
+        _err(str(exc))
+    new_trace_id = result.trace_id
+    if branch_name:
+        tip = max(result.spans, key=lambda span: (span.sequence, span.id))
+        try:
+            BranchManager(ts).create(branch_name, tip.id)
+        except (FileExistsError, KeyError, ValueError) as exc:
+            _err(str(exc))
+    errors = [span for span in result.spans if span.status is SpanStatus.ERROR]
+    skipped = [span for span in result.spans if span.status is SpanStatus.SKIPPED]
     if as_json:
-        typer.echo(json.dumps({"new_trace_id": new_trace_id}))
+        typer.echo(
+            json.dumps(
+                {
+                    "new_trace_id": new_trace_id,
+                    "branch": branch_name,
+                    "errors": [span.id for span in errors],
+                    "skipped": [span.id for span in skipped],
+                }
+            )
+        )
     else:
         typer.echo(new_trace_id)
+    if errors or skipped:
+        raise typer.Exit(code=1)
+
+
+# ---------------------------------------------------------------------------
+# demo
+# ---------------------------------------------------------------------------
+
+
+@app.command("demo")
+def cmd_demo(
+    root: Path = typer.Option(None, "--root", help="Path to the .clew directory."),
+    report: Path = typer.Option(
+        Path("clew-demo-report.html"),
+        "--report",
+        help="Self-contained HTML report for the repaired replay.",
+    ),
+) -> None:
+    """Run an offline failure → replay → branch → diff walkthrough."""
+    from clew.sdk.tracer import Tracer
+
+    clew_path = _resolve_root(root)
+    if not (clew_path / "manifest.json").exists():
+        try:
+            Store(clew_path)
+        except ClewError as exc:
+            _err(str(exc))
+    store, trace_store = _open_store(clew_path)
+    tracer = Tracer(store=trace_store, name="clew-demo")
+
+    @tracer.agent
+    def demo_agent(question: str) -> dict[str, Any]:
+        @tracer.span("choose-route", type=SpanType.DECISION)
+        def choose_route() -> str:
+            return "weather-tool"
+
+        @tracer.span("weather-tool", type=SpanType.TOOL)
+        def weather_tool() -> dict[str, Any]:
+            raise RuntimeError("demo API key is intentionally missing")
+
+        route = choose_route()
+        try:
+            answer = weather_tool()
+        except RuntimeError as exc:
+            answer = {"error": str(exc), "city": "Berlin"}
+        return {"question": question, "route": route, "answer": answer}
+
+    before_ids = set(store.iter_traces())
+    demo_agent("Will I need an umbrella?")
+    original_id = next(iter(set(store.iter_traces()) - before_ids))
+
+    def repair_executor(span: Any, context: ReplayContext) -> ReplayResult:
+        del context
+        if span.name == "weather-tool":
+            return ReplayResult(
+                output={"city": "Berlin", "forecast": "light rain", "offline": True},
+                attributes={"demo.repaired": True},
+            )
+        if span.name == "demo_agent":
+            return ReplayResult(
+                output={
+                    "question": "Will I need an umbrella?",
+                    "route": "weather-tool",
+                    "answer": {
+                        "city": "Berlin",
+                        "forecast": "light rain",
+                        "offline": True,
+                    },
+                }
+            )
+        return ReplayResult(output=span.output)
+
+    replayed = asyncio.run(
+        ReplayEngine(trace_store, RecordingExecutor(repair_executor)).replay(original_id)
+    )
+    branch_name = f"demo-fixed-{replayed.trace_id[:8]}"
+    tip = max(replayed.spans, key=lambda span: (span.sequence, span.id))
+    BranchManager(trace_store).create(branch_name, tip.id)
+    comparison = diff_traces(trace_store.get_trace(original_id), replayed)
+    report.parent.mkdir(parents=True, exist_ok=True)
+    write_html(replayed, report)
+
+    typer.echo("Clew offline demo complete")
+    typer.echo(f"  failed trace : {original_id}")
+    typer.echo(f"  replay trace : {replayed.trace_id}")
+    typer.echo(f"  branch       : {branch_name}")
+    typer.echo(
+        "  diff         : "
+        f"{len(comparison.modified)} modified, "
+        f"+{len(comparison.added)} -{len(comparison.removed)}"
+    )
+    typer.echo(f"  HTML report  : {report}")
 
 
 # ---------------------------------------------------------------------------
@@ -476,9 +621,7 @@ def cmd_share(
     out: Path = typer.Option(
         None, "--out", help="Output path. Default: <trace_id>.clew.tgz in cwd."
     ),
-    key: Path = typer.Option(
-        ..., "--key", help="Ed25519 private key (PEM) to sign with."
-    ),
+    key: Path = typer.Option(..., "--key", help="Ed25519 private key (PEM) to sign with."),
     root: Path = typer.Option(None, "--root", help="Path to the .clew directory."),
 ) -> None:
     """Export a portable signed bundle (tar.gz) for sharing.
@@ -489,7 +632,7 @@ def cmd_share(
 
         manifest.json   bundle metadata + content hash
         sig             64-byte Ed25519 signature
-        spans/<id>.json one JSON-Lines file per span
+        spans/<id>.json one finalized JSON record per span
     """
     clew_path = _resolve_root(root)
     output = out or (Path.cwd() / f"{trace_id}.clew.tgz")
@@ -556,7 +699,10 @@ def cmd_import(
     if not v.valid:
         _err(f"bundle invalid: {v.reason}")
     assert v.manifest is not None
-    spans = extract_spans(bundle)
+    # Persist the exact objects parsed during signature verification. Reopening
+    # the path here would allow the file to be replaced between verification
+    # and import.
+    spans = {span.id: span for span in v.verified_spans}
     clew_path = _resolve_root(root)
     store, ts = _open_store(clew_path)
     added = 0
@@ -564,15 +710,12 @@ def cmd_import(
         try:
             ts.add_span(s)
             added += 1
-        except Exception as exc:
-            typer.echo(f"  warn: failed to import span {s.id}: {exc}", err=True)
+        except (ClewError, ValueError) as exc:
+            _err(f"failed to import span {s.id}: {exc}")
     if branch_name and v.manifest.get("root_span_id"):
         bm = BranchManager(ts)
         bm.create(branch_name, v.manifest["root_span_id"])
-    typer.echo(
-        f"imported {added}/{len(spans)} spans, "
-        f"trace_id={v.manifest['trace_id']}"
-    )
+    typer.echo(f"imported {added}/{len(spans)} spans, trace_id={v.manifest['trace_id']}")
 
 
 # ---------------------------------------------------------------------------
@@ -588,12 +731,12 @@ def cmd_export(
     ),
     root: Path = typer.Option(None, "--root", help="Path to the .clew directory."),
 ) -> None:
-    """Export a trace to OTel-compatible NDJSON.
+    """Export a trace to an OTel-shaped NDJSON bridge.
 
     The output is one JSON object per line: a leading ``_kind:
     trace`` header followed by every span rendered in OTel's
     gen_ai.* shape. The file is round-trippable through ``clew
-    otel-import`` or any OTel collector that accepts NDJSON.
+    otel-import``. This is not an OTLP exporter or wire-compatible OTLP stream.
     """
     clew_path = _resolve_root(root)
     store, ts = _open_store(clew_path)
@@ -616,7 +759,7 @@ def cmd_otel_import(
         help="Create a branch pointing at the imported root span.",
     ),
 ) -> None:
-    """Import a trace from an OTel-compatible NDJSON file.
+    """Import a trace from Clew's OTel-shaped NDJSON bridge.
 
     Existing spans with the same id are left untouched (idempotent).
     A branch is optionally created so you can ``clew checkout`` into
@@ -635,8 +778,8 @@ def cmd_otel_import(
         try:
             ts.add_span(s)
             added += 1
-        except Exception as exc:
-            typer.echo(f"  warn: failed to import span {s.id}: {exc}", err=True)
+        except (ClewError, ValueError) as exc:
+            _err(f"failed to import span {s.id}: {exc}")
     if branch_name and spans:
         from clew.core.branch import BranchManager
 
@@ -662,19 +805,15 @@ def cmd_query(
     status: str | None = typer.Option(
         None,
         "--status",
-        help="Filter by span status (OK, ERROR).",
+        help="Filter by span status (OK, ERROR, SKIPPED).",
     ),
-    trace_id: str | None = typer.Option(
-        None, "--trace", help="Restrict to a single trace id."
-    ),
+    trace_id: str | None = typer.Option(None, "--trace", help="Restrict to a single trace id."),
     metadata: list[str] | None = typer.Option(
         None,
         "--metadata",
         help="Match metadata key=value (repeatable, all keys must match).",
     ),
-    limit: int = typer.Option(
-        50, "--limit", help="Maximum number of matches to return."
-    ),
+    limit: int = typer.Option(50, "--limit", help="Maximum number of matches to return."),
     root: Path = typer.Option(None, "--root", help="Path to the .clew directory."),
     as_json: bool = typer.Option(False, "--json", help="Emit JSON instead of a table."),
 ) -> None:
@@ -690,15 +829,11 @@ def cmd_query(
     try:
         type_enum = SpanType(type) if type else None
     except ValueError:
-        _err(
-            f"unknown type {type!r}; expected one of {[t.value for t in SpanType]}"
-        )
+        _err(f"unknown type {type!r}; expected one of {[t.value for t in SpanType]}")
     try:
         status_enum = SpanStatus(status) if status else None
     except ValueError:
-        _err(
-            f"unknown status {status!r}; expected one of {[s.value for s in SpanStatus]}"
-        )
+        _err(f"unknown status {status!r}; expected one of {[s.value for s in SpanStatus]}")
     try:
         meta = parse_metadata_spec(metadata or [])
     except ValueError as exc:
@@ -801,13 +936,9 @@ def cmd_doctor(
         table.add_column("code")
         table.add_column("message")
         for i in r.errors:
-            table.add_row(
-                f"[red]{i.severity.value}[/red]", i.code, i.message
-            )
+            table.add_row(f"[red]{i.severity.value}[/red]", i.code, i.message)
         for i in r.warnings:
-            table.add_row(
-                f"[yellow]{i.severity.value}[/yellow]", i.code, i.message
-            )
+            table.add_row(f"[yellow]{i.severity.value}[/yellow]", i.code, i.message)
         if not r.issues:
             table.add_row("[green]ok[/green]", "-", "no issues found")
         summary = (
@@ -828,6 +959,12 @@ def cmd_gc(
         "--dry-run",
         help="Report what would be deleted without actually removing anything.",
     ),
+    grace_seconds: float = typer.Option(
+        GC_MIN_AGE_SECONDS,
+        "--grace-seconds",
+        min=0.0,
+        help="Keep unreferenced spans newer than this many seconds (default: 300).",
+    ),
     as_json: bool = typer.Option(False, "--json", help="Emit JSON instead of a table."),
 ) -> None:
     """Remove span files that are no longer reachable from any branch.
@@ -837,14 +974,12 @@ def cmd_gc(
     is destructive; pass ``--dry-run`` to preview.
     """
     clew_path = _resolve_root(root)
-    r = gc(clew_path, dry_run=dry_run)
+    r = gc(clew_path, dry_run=dry_run, min_age_seconds=grace_seconds)
     if as_json:
         typer.echo(json.dumps(r.to_dict(), indent=2))
     else:
         action = "would delete" if dry_run else "deleted"
-        typer.echo(
-            f"scanned {r.scanned} spans, {action} {r.deleted}, kept {r.kept}"
-        )
+        typer.echo(f"scanned {r.scanned} spans, {action} {r.deleted}, kept {r.kept}")
         if r.deleted_ids and not as_json:
             sample = ", ".join(s[:12] for s in r.deleted_ids[:5])
             if len(r.deleted_ids) > 5:
@@ -888,8 +1023,7 @@ def cmd_mcp() -> None:
         from clew.mcp_server import main as mcp_main
     except ImportError as exc:
         _err(
-            f"MCP support requires the `mcp` package: {exc}. "
-            "Install with `uv add 'clew[mcp]'`."
+            f"MCP support requires the `mcp` package: {exc}. Install with `uv add 'clew-ai[mcp]'`."
         )
     raise typer.Exit(code=mcp_main())
 
@@ -901,15 +1035,9 @@ def cmd_mcp() -> None:
 
 @app.command("bench")
 def cmd_bench(
-    spans: int = typer.Option(
-        5_000, "--spans", help="Spans per trace for the scaling test."
-    ),
-    traces: int = typer.Option(
-        100, "--traces", help="Number of traces to record."
-    ),
-    orphans: int = typer.Option(
-        1_000, "--orphans", help="Number of orphan spans to GC."
-    ),
+    spans: int = typer.Option(5_000, "--spans", help="Spans per trace for the scaling test."),
+    traces: int = typer.Option(100, "--traces", help="Number of traces to record."),
+    orphans: int = typer.Option(1_000, "--orphans", help="Number of orphan spans to GC."),
     out: Path | None = typer.Option(
         None,
         "--out",
@@ -945,8 +1073,16 @@ def cmd_bench(
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(r, indent=2), encoding="utf-8")
         typer.echo(f"wrote {out}")
-    typer.echo(f"record  : {r['record_ms']:.0f}ms ({r['traces_recorded']} traces, "
-               f"{r['spans_per_trace']} spans/trace)")
-    typer.echo(f"diff    : {r['diff_ms']:.0f}ms ({r['diff_added']}+{r['diff_removed']}+{r['diff_changed']} changes)")
-    typer.echo(f"gc      : {r['gc_ms']:.0f}ms ({r['orphans_scanned']} scanned, {r['orphans_deleted']} deleted)")
-    typer.echo(f"dedup   : {r['dedup_unique']} unique ids from {r['dedup_inputs']} inputs")
+    typer.echo(
+        f"record  : {r['record_ms']:.0f}ms ({r['traces_recorded']} traces, "
+        f"{r['spans_per_trace']} spans/trace)"
+    )
+    typer.echo(
+        f"diff    : {r['diff_ms']:.0f}ms ({r['diff_added']}+{r['diff_removed']}+{r['diff_changed']} changes)"
+    )
+    typer.echo(
+        f"gc      : {r['gc_ms']:.0f}ms ({r['orphans_scanned']} scanned, {r['orphans_deleted']} deleted)"
+    )
+    typer.echo(
+        f"identity : {r['dedup_unique']} unique ids from {r['dedup_inputs']} identical inputs"
+    )

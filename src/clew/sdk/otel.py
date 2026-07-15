@@ -1,145 +1,208 @@
-"""OTel bridge: convert between clew spans and OpenTelemetry-style dicts.
-
-This module does NOT depend on the ``opentelemetry`` package. It
-implements just the format conversion (clew ``Span`` ↔ OTel ``gen_ai.*``
-attribute dict) and the optional monkey-patch helpers for popular
-LLM clients.
-
-Why not depend on OTel SDK directly?
-
-* clew is local-first and zero-dep is a virtue.
-* Most users who want OTel interop already have the SDK installed;
-  for them, the bridge is a small surface area.
-* Users without OTel installed still get a working conversion
-  (just dicts, no protocol).
-"""
+"""OTel-shaped projection and optional provider-client instrumentation."""
 
 from __future__ import annotations
 
+import functools
+import inspect
+from pathlib import Path
 from typing import Any
 
 from clew.core.format import from_otel, to_otel
-from clew.core.models import Span
+from clew.core.models import Span, SpanType
 
-# These are imported lazily so the SDK works even if the user never
-# instruments an OpenAI or Anthropic client. The patches are
-# no-ops if the underlying library is missing.
-
-_OTEL_ATTRIBUTES = {
-    "system": "gen_ai.system",
-    "model": "gen_ai.request.model",
-    "input_tokens": "gen_ai.usage.input_tokens",
-    "output_tokens": "gen_ai.usage.output_tokens",
-    "finish_reason": "gen_ai.response.finish_reason",
-    "completion": "gen_ai.completion",
-    "tool_name": "gen_ai.tool.name",
-    "tool_call_id": "gen_ai.tool.call.id",
+_SECRET_KEYS = {
+    "api_key",
+    "apikey",
+    "authorization",
+    "password",
+    "secret",
+    "token",
 }
 
 
 def to_otel_span(span: Span) -> dict[str, Any]:
-    """Convert a clew :class:`Span` to an OTel-style attribute dict."""
+    """Convert a Clew span to the documented OTel-shaped dictionary."""
     return to_otel(span)
 
 
 def from_otel_span(otel_dict: dict[str, Any]) -> Span:
-    """Convert an OTel-style attribute dict to a clew :class:`Span`."""
+    """Import one OTel-shaped dictionary with fresh Clew identities."""
     return from_otel(otel_dict)
 
 
-def instrument_openai(client: Any, tracer: Any | None = None) -> None:
-    """Monkey-patch an OpenAI client to emit clew spans on every call.
+def _jsonable(value: Any) -> Any:
+    """Convert provider response objects to stable, persistable data."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(item) for item in value]
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        try:
+            return _jsonable(model_dump(mode="json"))
+        except (TypeError, ValueError):
+            return _jsonable(model_dump())
+    return str(value)
 
-    Wraps ``client.chat.completions.create`` so each call writes a
-    span to a fresh ``.clew`` in the current working directory. The
-    original method is preserved on the instance as ``__wrapped__``.
 
-    Pass ``tracer=`` to use an existing :class:`clew.sdk.Tracer`
-    instead of creating one. No-op if the OpenAI library is not
-    importable.
-    """
-    try:
-        pass
-    except Exception:
+def _redact(value: Any, key: str | None = None) -> Any:
+    if key is not None and key.lower().replace("-", "_") in _SECRET_KEYS:
+        return "[REDACTED]"
+    if isinstance(value, dict):
+        return {str(k): _redact(v, str(k)) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_redact(item) for item in value]
+    return _jsonable(value)
+
+
+def _capture_input(args: tuple[Any, ...], kwargs: dict[str, Any]) -> dict[str, Any]:
+    return {"args": _redact(list(args)), "kwargs": _redact(kwargs)}
+
+
+def _capture_output(response: Any, *, provider: str) -> Any:
+    """Return the assistant payload while retaining non-text responses."""
+    if provider == "openai":
+        choices = getattr(response, "choices", None)
+        if choices:
+            message = getattr(choices[0], "message", None)
+            content = getattr(message, "content", None)
+            if content is not None:
+                return _jsonable(content)
+    elif provider == "anthropic":
+        content = getattr(response, "content", None)
+        if content:
+            text_blocks = [
+                block.text
+                for block in content
+                if getattr(block, "type", None) == "text"
+                and isinstance(getattr(block, "text", None), str)
+            ]
+            if text_blocks:
+                return "".join(text_blocks)
+    return _jsonable(response)
+
+
+def _set_usage(span: Any, response: Any, *, provider: str) -> None:
+    usage = getattr(response, "usage", None)
+    if usage is None and isinstance(response, dict):
+        usage = response.get("usage")
+    if usage is None:
         return
-    if not hasattr(client, "chat"):
+
+    def read(*names: str) -> Any:
+        for name in names:
+            if isinstance(usage, dict) and name in usage:
+                return usage[name]
+            value = getattr(usage, name, None)
+            if value is not None:
+                return value
+        return None
+
+    input_tokens = read("input_tokens", "prompt_tokens")
+    output_tokens = read("output_tokens", "completion_tokens")
+    if input_tokens is not None:
+        span.set_attribute("gen_ai.usage.input_tokens", input_tokens)
+    if output_tokens is not None:
+        span.set_attribute("gen_ai.usage.output_tokens", output_tokens)
+    span.set_attribute("gen_ai.system", provider)
+
+
+def _tracer_or_default(tracer: Any | None) -> Any:
+    if tracer is not None:
+        return tracer
+    from clew.sdk.tracer import Tracer
+
+    return Tracer(cwd=Path.cwd())
+
+
+def _instrument_create(
+    owner: Any,
+    *,
+    provider: str,
+    operation_name: str,
+    tracer: Any | None,
+) -> None:
+    original = getattr(owner, "create", None)
+    if original is None or not callable(original):
         return
-    original = client.chat.completions.create
     if getattr(original, "__clew_wrapped__", False):
+        existing_tracer = getattr(original, "__clew_tracer__", None)
+        if tracer is None or tracer is existing_tracer:
+            return
+        raise ValueError(
+            "provider client is already instrumented with a different Clew Tracer; "
+            "create a separate client or reuse the original Tracer"
+        )
+    selected_tracer = _tracer_or_default(tracer)
+
+    if inspect.iscoroutinefunction(original):
+
+        @functools.wraps(original)
+        async def async_wrapped(*args: Any, **kwargs: Any) -> Any:
+            with selected_tracer.trace(operation_name, type=SpanType.LLM) as span:
+                span.set_input(_capture_input(args, kwargs))
+                span.set_attribute("gen_ai.system", provider)
+                if "model" in kwargs:
+                    span.set_attribute("gen_ai.request.model", kwargs["model"])
+                response = await original(*args, **kwargs)
+                _set_usage(span, response, provider=provider)
+                span.set_output(_capture_output(response, provider=provider))
+                return response
+
+        async_wrapped.__clew_wrapped__ = True  # type: ignore[attr-defined]
+        async_wrapped.__clew_tracer__ = selected_tracer  # type: ignore[attr-defined]
+        owner.create = async_wrapped
         return
 
-    def wrapped(*args: Any, **kwargs: Any) -> Any:
-        from pathlib import Path
-
-        from clew.core.models import SpanType
-        from clew.sdk.tracer import Tracer
-        t = tracer if tracer is not None else Tracer(cwd=Path.cwd())
-        with t.trace("openai.chat.completions.create", type=SpanType.LLM) as span:
-            span.set_attribute("gen_ai.system", "openai")
+    @functools.wraps(original)
+    def sync_wrapped(*args: Any, **kwargs: Any) -> Any:
+        with selected_tracer.trace(operation_name, type=SpanType.LLM) as span:
+            span.set_input(_capture_input(args, kwargs))
+            span.set_attribute("gen_ai.system", provider)
             if "model" in kwargs:
                 span.set_attribute("gen_ai.request.model", kwargs["model"])
-            span.set_output(None)
             response = original(*args, **kwargs)
-            try:
-                usage = getattr(response, "usage", None)
-                if usage is not None:
-                    span.set_attribute("gen_ai.usage.input_tokens", usage.prompt_tokens)
-                    span.set_attribute("gen_ai.usage.output_tokens", usage.completion_tokens)
-            except Exception:
-                pass
-            try:
-                if getattr(response, "choices", None):
-                    span.set_output(response.choices[0].message.content)
-            except Exception:
-                pass
+            _set_usage(span, response, provider=provider)
+            span.set_output(_capture_output(response, provider=provider))
             return response
 
-    wrapped.__clew_wrapped__ = True  # type: ignore[attr-defined]
-    client.chat.completions.create = wrapped  # type: ignore[assignment]
+    sync_wrapped.__clew_wrapped__ = True  # type: ignore[attr-defined]
+    sync_wrapped.__clew_tracer__ = selected_tracer  # type: ignore[attr-defined]
+    owner.create = sync_wrapped
+
+
+def instrument_openai(client: Any, tracer: Any | None = None) -> None:
+    """Instrument sync or async OpenAI chat-completion calls idempotently."""
+    chat = getattr(client, "chat", None)
+    completions = getattr(chat, "completions", None)
+    if completions is None:
+        return
+    _instrument_create(
+        completions,
+        provider="openai",
+        operation_name="openai.chat.completions.create",
+        tracer=tracer,
+    )
 
 
 def instrument_anthropic(client: Any, tracer: Any | None = None) -> None:
-    """Monkey-patch an Anthropic client to emit clew spans on every call.
-
-    Same shape as :func:`instrument_openai`. Pass ``tracer=`` to
-    share an existing tracer; otherwise one is created on the fly.
-    No-op if the anthropic SDK is not importable.
-    """
-    try:
-        pass
-    except Exception:
+    """Instrument sync or async Anthropic message calls idempotently."""
+    messages = getattr(client, "messages", None)
+    if messages is None:
         return
-    if not hasattr(client, "messages"):
-        return
-    original = client.messages.create
-    if getattr(original, "__clew_wrapped__", False):
-        return
+    _instrument_create(
+        messages,
+        provider="anthropic",
+        operation_name="anthropic.messages.create",
+        tracer=tracer,
+    )
 
-    def wrapped(*args: Any, **kwargs: Any) -> Any:
-        from pathlib import Path
 
-        from clew.core.models import SpanType
-        from clew.sdk.tracer import Tracer
-        t = tracer if tracer is not None else Tracer(cwd=Path.cwd())
-        with t.trace("anthropic.messages.create", type=SpanType.LLM) as span:
-            span.set_attribute("gen_ai.system", "anthropic")
-            if "model" in kwargs:
-                span.set_attribute("gen_ai.request.model", kwargs["model"])
-            response = original(*args, **kwargs)
-            try:
-                usage = getattr(response, "usage", None)
-                if usage is not None:
-                    span.set_attribute("gen_ai.usage.input_tokens", usage.input_tokens)
-                    span.set_attribute("gen_ai.usage.output_tokens", usage.output_tokens)
-            except Exception:
-                pass
-            try:
-                content = getattr(response, "content", None)
-                if content and isinstance(content, list) and content:
-                    span.set_output(content[0].text)
-            except Exception:
-                pass
-            return response
-
-    wrapped.__clew_wrapped__ = True  # type: ignore[attr-defined]
-    client.messages.create = wrapped  # type: ignore[assignment]  # type: ignore[assignment]
+__all__ = [
+    "from_otel_span",
+    "instrument_anthropic",
+    "instrument_openai",
+    "to_otel_span",
+]

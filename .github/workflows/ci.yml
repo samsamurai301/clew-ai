@@ -5,28 +5,133 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
-  test:
-    name: test (py${{ matrix.python-version }})
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          version: "0.11.21"
+          enable-cache: true
+      - run: uv python install 3.12
+      - run: uv sync --python 3.12 --all-extras --group docs --frozen
+      - run: uv run ruff format --check .
+      - run: uv run ruff check .
+      - run: uv run mypy --strict src
+      - run: uv run mkdocs build --strict
+      - name: Branch coverage
+        run: >-
+          uv run pytest -m "not e2e and not slow"
+          --cov=clew --cov-branch --cov-report=term-missing --cov-report=xml
+      - uses: codecov/codecov-action@0fb7174895f61a3b6b78fc075e0cd60383518dac # v5
+        with:
+          files: coverage.xml
+          fail_ci_if_error: false
+
+  python:
+    name: Python ${{ matrix.python-version }} on Linux
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12", "3.13"]
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
     steps:
-      - uses: actions/checkout@v4
-      - name: Install uv
-        uses: astral-sh/setup-uv@v3
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
-          version: "latest"
-      - name: Set up Python ${{ matrix.python-version }}
-        run: uv python install ${{ matrix.python-version }}
-      - name: Sync dependencies
-        run: uv sync --all-extras
-      - name: Lint (ruff)
-        run: uv run ruff check .
-      - name: Type-check (mypy)
-        run: uv run mypy --strict src/
-      - name: Test
-        run: uv run pytest -v
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          version: "0.11.21"
+          enable-cache: true
+      - run: uv python install ${{ matrix.python-version }}
+      - run: uv sync --python ${{ matrix.python-version }} --all-extras --frozen
+      - run: uv run --python ${{ matrix.python-version }} pytest -m "not e2e and not slow"
+
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          version: "0.11.21"
+          enable-cache: true
+      - run: uv python install 3.12
+      - run: uv sync --python 3.12 --all-extras --frozen
+      - run: uv build
+      - run: uv run pytest -m e2e
+
+  performance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          version: "0.11.21"
+          enable-cache: true
+      - run: uv python install 3.12
+      - run: uv sync --python 3.12 --frozen
+      - name: 10,000-span release contract
+        run: uv run pytest tests/test_scaling.py::test_store_handles_10_000_spans_with_release_limits -q -s
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          version: "0.11.21"
+      - run: uv python install 3.12
+      - run: uv sync --python 3.12 --frozen
+      - run: uv build
+      - run: uv run twine check dist/*
+      - name: Inspect wheel
+        run: |
+          VERSION=$(python -c 'import pathlib,tomllib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')
+          WHEEL="dist/clew_ai-${VERSION}-py3-none-any.whl"
+          test -f "$WHEEL"
+          unzip -l "$WHEEL" | grep 'clew/py.typed'
+          unzip -p "$WHEEL" '*/METADATA' | grep 'Name: clew-ai'
+          unzip -p "$WHEEL" '*/METADATA' | grep "Version: ${VERSION}"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: distributions
+          path: dist/*
+          if-no-files-found: error
+
+  wheel-smoke:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: distributions
+          path: dist
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - name: Install wheel and run the complete demo
+        shell: bash
+        run: |
+          python -m pip install dist/*.whl
+          workdir=$(mktemp -d)
+          cd "$workdir"
+          clew demo
+          clew-ai version

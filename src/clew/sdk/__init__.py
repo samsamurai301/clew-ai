@@ -17,6 +17,7 @@ Importable surface:
 from __future__ import annotations
 
 from clew.core.models import Span, SpanStatus, SpanType, Trace
+from clew.core.replay import ReplayContext, ReplayExecutor, ReplayResult
 from clew.sdk.context import current_span, current_trace_id
 from clew.sdk.otel import from_otel_span, instrument_anthropic, instrument_openai, to_otel_span
 from clew.sdk.tracer import Tracer
@@ -35,6 +36,9 @@ OTelBridge = type(
 
 __all__ = [
     "OTelBridge",
+    "ReplayContext",
+    "ReplayExecutor",
+    "ReplayResult",
     "Span",
     "SpanStatus",
     "SpanType",

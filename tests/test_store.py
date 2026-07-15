@@ -1,292 +1,289 @@
-"""Tests for clew.core.store — content-addressed store, dedup, indexing, iteration."""
+"""Tests for the v2 occurrence store and integrity boundary."""
 
 from __future__ import annotations
 
 import json
+import multiprocessing
+import os
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 
+from clew.core.errors import (
+    ConflictingSpanError,
+    DuplicateSequenceError,
+    SpanIntegrityError,
+    StoreManifestError,
+    UnsupportedStoreVersion,
+)
 from clew.core.models import Span, SpanStatus, SpanType
-from clew.core.store import Store
-
-# ---------------------------------------------------------------------------
-# Fixtures and helpers
-# ---------------------------------------------------------------------------
+from clew.core.store import STORE_VERSION, Store
 
 
-def _make_span(
+def _span(
     *,
-    span_id: str,
-    trace_id: str = "t" * 64,
-    name: str = "test",
+    span_id: str | None = None,
+    trace_id: str | None = None,
+    sequence: int = 0,
     parent_ids: list[str] | None = None,
-    span_type: SpanType = SpanType.LLM,
-    started_at: datetime | None = None,
-    ended_at: datetime | None = None,
-    attributes: dict[str, object] | None = None,
-    input_data: object | None = None,
-    output_data: object | None = None,
+    name: str = "step",
+    output: object = "out",
 ) -> Span:
-    """Build a Span with sensible defaults for store tests."""
+    now = datetime.now(UTC)
     return Span(
-        id=span_id,
-        trace_id=trace_id,
-        parent_ids=list(parent_ids or []),
-        type=span_type,
+        id=span_id or uuid4().hex,
+        trace_id=trace_id or uuid4().hex,
+        parent_ids=parent_ids or [],
+        sequence=sequence,
+        type=SpanType.OBSERVATION,
         name=name,
-        attributes=dict(attributes or {}),
-        input=input_data,
-        output=output_data,
-        started_at=started_at or datetime(2026, 7, 13, 18, 0, 0, tzinfo=UTC),
-        ended_at=ended_at or datetime(2026, 7, 13, 18, 0, 1, tzinfo=UTC),
+        attributes={"sequence": sequence},
+        input={"value": 1},
+        output=output,
+        started_at=now,
+        ended_at=now,
         status=SpanStatus.OK,
     )
 
 
 @pytest.fixture
 def store(tmp_path: Path) -> Store:
-    """A fresh Store rooted at a tmp_path/.clew/ directory."""
-    root = tmp_path / ".clew"
-    return Store(root)
+    return Store(tmp_path / ".clew")
 
 
-# ---------------------------------------------------------------------------
-# Manifest + HEAD
-# ---------------------------------------------------------------------------
-
-
-def test_manifest_written_on_init(tmp_path: Path) -> None:
-    """Initializing a Store writes a manifest.json with version=1."""
+def test_fresh_store_writes_v2_manifest_and_layout(tmp_path: Path) -> None:
     root = tmp_path / ".clew"
     Store(root)
     manifest = json.loads((root / "manifest.json").read_text())
-    assert manifest["version"] == 1
-    assert "created_at" in manifest
-
-
-def test_manifest_not_overwritten_on_reopen(tmp_path: Path) -> None:
-    """A second Store on the same root preserves the original manifest."""
-    root = tmp_path / ".clew"
-    s1 = Store(root)
-    original = (root / "manifest.json").read_text()
-    # Mutate the manifest to detect a re-write.
-    (root / "manifest.json").write_text('{"version": 1, "created_at": "OLD"}')
-    Store(root)
-    assert (root / "manifest.json").read_text() == '{"version": 1, "created_at": "OLD"}'
-    # And the first store's handle is still valid.
-    assert s1 is not None
-
-
-def test_head_defaults_to_main(tmp_path: Path) -> None:
-    """The HEAD file exists and points to the main branch by default."""
-    root = tmp_path / ".clew"
-    Store(root)
+    assert manifest["format"] == "clew-store"
+    assert manifest["version"] == STORE_VERSION == 2
     assert (root / "HEAD").read_text().strip() == "main"
-
-
-def test_directory_layout(tmp_path: Path) -> None:
-    """The expected subdirectories are created on init."""
-    root = tmp_path / ".clew"
-    Store(root)
-    assert (root / "spans").is_dir()
-    assert (root / "refs").is_dir()
+    assert (root / "refs" / "main").read_text().strip() == "0" * 32
     assert (root / "index.sqlite").is_file()
 
 
-# ---------------------------------------------------------------------------
-# put / get / has
-# ---------------------------------------------------------------------------
+def test_v1_store_is_rejected_without_modification(tmp_path: Path) -> None:
+    root = tmp_path / ".clew"
+    root.mkdir()
+    manifest = b'{"version":1,"created_at":"old"}\n'
+    (root / "manifest.json").write_bytes(manifest)
+    with pytest.raises(UnsupportedStoreVersion, match="Archive or rename"):
+        Store(root)
+    assert (root / "manifest.json").read_bytes() == manifest
+    assert [path.name for path in root.iterdir()] == ["manifest.json"]
 
 
-def test_put_returns_span_id(store: Store) -> None:
-    """put returns the span's id."""
-    span = _make_span(span_id="a" * 64)
-    assert store.put(span) == "a" * 64
+def test_unversioned_records_are_never_adopted_automatically(tmp_path: Path) -> None:
+    root = tmp_path / ".clew"
+    record = root / "spans" / "aa" / f"{'a' * 32}.json"
+    record.parent.mkdir(parents=True)
+    record.write_text("{}")
+    with pytest.raises(StoreManifestError, match="no manifest"):
+        Store(root)
+    assert record.read_text() == "{}"
 
 
-def test_get_roundtrip(store: Store) -> None:
-    """A span put and then get returns an equal span."""
-    span = _make_span(
-        span_id="a" * 64,
-        name="roundtrip",
-        attributes={"gen_ai.system": "openai", "k": [1, 2, 3]},
-        input_data={"messages": [{"role": "user", "content": "hi"}]},
-        output_data={"text": "hello"},
+def test_put_get_and_exact_idempotency(store: Store) -> None:
+    span = _span()
+    assert store.put(span) == span.id
+    path = store.root / "spans" / span.id[:2] / f"{span.id}.json"
+    first = path.read_bytes()
+    assert store.put(span) == span.id
+    assert path.read_bytes() == first
+    assert store.get(span.id) == span
+    assert store.has(span.id)
+
+
+def test_same_id_with_different_valid_content_is_conflict(store: Store) -> None:
+    first = _span(output="first")
+    second = _span(
+        span_id=first.id,
+        trace_id=first.trace_id,
+        sequence=first.sequence,
+        output="second",
     )
+    store.put(first)
+    with pytest.raises(ConflictingSpanError, match="not overwritten"):
+        store.put(second)
+    assert store.get(first.id).output == "first"
+
+
+def test_duplicate_sequence_in_one_trace_is_rejected(store: Store) -> None:
+    trace_id = uuid4().hex
+    store.put(_span(trace_id=trace_id, sequence=0))
+    with pytest.raises(DuplicateSequenceError):
+        store.put(_span(trace_id=trace_id, sequence=0))
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("trace_id", "f" * 32),
+        ("sequence", 99),
+        ("name", "tampered"),
+        ("attributes", {"tampered": True}),
+        ("input", {"tampered": True}),
+        ("output", "tampered"),
+        ("started_at", "2020-01-01T00:00:00Z"),
+        ("ended_at", "2030-01-01T00:00:00Z"),
+        ("status", "SKIPPED"),
+        ("metadata", {"tampered": True}),
+    ],
+)
+def test_get_detects_tampering_of_every_persisted_payload_field(
+    store: Store, field: str, replacement: object
+) -> None:
+    span = _span()
     store.put(span)
-    loaded = store.get(span.id)
-    assert loaded == span
+    path = store.root / "spans" / span.id[:2] / f"{span.id}.json"
+    payload = json.loads(path.read_text())
+    payload[field] = replacement
+    path.write_text(json.dumps(payload))
+    with pytest.raises(SpanIntegrityError):
+        store.get(span.id)
 
 
-def test_get_raises_keyerror_for_missing(store: Store) -> None:
-    """get raises KeyError for an unknown span id."""
-    with pytest.raises(KeyError):
-        store.get("f" * 64)
-
-
-def test_has_true_for_existing(store: Store) -> None:
-    """has returns True for a span that was put."""
-    span = _make_span(span_id="a" * 64)
+def test_get_detects_tampered_hash_and_filename(store: Store) -> None:
+    span = _span()
     store.put(span)
-    assert store.has(span.id) is True
+    path = store.root / "spans" / span.id[:2] / f"{span.id}.json"
+    payload = json.loads(path.read_text())
+    payload["content_hash"] = "0" * 64
+    path.write_text(json.dumps(payload))
+    with pytest.raises(SpanIntegrityError):
+        store.get(span.id)
 
 
-def test_has_false_for_missing(store: Store) -> None:
-    """has returns False for a span that was never put."""
-    assert store.has("f" * 64) is False
-
-
-def test_put_idempotent_no_error(store: Store) -> None:
-    """put on the same span twice does not raise and returns the id."""
-    span = _make_span(span_id="a" * 64)
-    assert store.put(span) == span.id
-    assert store.put(span) == span.id
-
-
-def test_put_dedup_does_not_grow_file(store: Store) -> None:
-    """put twice on the same id leaves the JSONL file at exactly one line."""
-    span = _make_span(span_id="a" * 64)
+@pytest.mark.parametrize("mutation", ["whitespace", "duplicate-key"])
+def test_get_rejects_noncanonical_record_bytes(store: Store, mutation: str) -> None:
+    span = _span()
     store.put(span)
-    span_path = store.root / "spans" / span.id[:2] / f"{span.id}.jsonl"
-    size_first = span_path.stat().st_size
-    with span_path.open(encoding="utf-8") as f:
-        lines_first = sum(1 for _ in f)
-    # Second put.
-    store.put(span)
-    size_second = span_path.stat().st_size
-    with span_path.open(encoding="utf-8") as f:
-        lines_second = sum(1 for _ in f)
-    assert size_first == size_second, "file grew on duplicate put"
-    assert lines_first == lines_second == 1, "JSONL should have exactly one line"
+    path = store.root / "spans" / span.id[:2] / f"{span.id}.json"
+    original = path.read_bytes()
+    if mutation == "whitespace":
+        path.write_bytes(original + b"\n")
+    else:
+        text = original.decode()
+        path.write_text(text.replace('"input":', '"input":{"ignored":true},"input":', 1))
+    with pytest.raises(SpanIntegrityError, match="canonical"):
+        store.get(span.id)
 
 
-def test_put_uses_append_mode(store: Store) -> None:
-    """The file path matches the content-addressed layout."""
-    span = _make_span(span_id="abcdef" + "0" * 58)
-    store.put(span)
-    expected_dir = store.root / "spans" / "ab"
-    expected_file = expected_dir / f"{span.id}.jsonl"
-    assert expected_file.is_file()
-
-
-# ---------------------------------------------------------------------------
-# SQLite index
-# ---------------------------------------------------------------------------
-
-
-def test_index_has_table(tmp_path: Path) -> None:
-    """index.sqlite has the spans table with the expected columns."""
+def test_missing_index_is_rebuilt_from_verified_json(tmp_path: Path) -> None:
     root = tmp_path / ".clew"
     store = Store(root)
-    span = _make_span(span_id="a" * 64)
-    store.put(span)
-    with sqlite3.connect(root / "index.sqlite") as conn:
-        cols = [r[1] for r in conn.execute("PRAGMA table_info(spans)").fetchall()]
-    assert "id" in cols
-    assert "trace_id" in cols
-    assert "type" in cols
-    assert "name" in cols
-    assert "started_at" in cols
-    assert "ended_at" in cols
-    assert "status" in cols
-    assert "parent_ids" in cols
-    assert "content_hash" in cols
-
-
-def test_index_rebuild_from_jsonl(tmp_path: Path) -> None:
-    """Deleting index.sqlite triggers a rebuild from the JSONL files on reopen."""
-    root = tmp_path / ".clew"
-    store = Store(root)
-    spans = [
-        _make_span(span_id="a" * 64, trace_id="t" * 64),
-        _make_span(span_id="b" * 64, trace_id="t" * 64, name="other"),
-    ]
-    for s in spans:
-        store.put(s)
+    spans = [_span(), _span()]
+    for span in spans:
+        store.put(span)
     (root / "index.sqlite").unlink()
-    # Re-open; the index must be rebuilt.
+    reopened = Store(root)
+    assert {span.id for span in reopened.iter_spans()} == {span.id for span in spans}
+
+
+def test_sqlite_uses_wal_busy_timeout_and_sequence_index(store: Store) -> None:
+    with sqlite3.connect(store.root / "index.sqlite") as conn:
+        mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+        indexes = {row[1] for row in conn.execute("PRAGMA index_list(spans)")}
+    assert mode == "wal"
+    assert "idx_spans_trace_sequence" in indexes
+
+
+def test_unique_temp_files_do_not_collide_or_become_records(store: Store) -> None:
+    span = _span()
+    shard = store.root / "spans" / span.id[:2]
+    shard.mkdir(parents=True)
+    (shard / f".{span.id}.json.interrupted.tmp").write_text("partial")
+    store.put(span)
+    assert [item.id for item in store.iter_spans()] == [span.id]
+
+
+def _process_writer(root: str, count: int, queue: multiprocessing.Queue[object]) -> None:
+    try:
+        store = Store(Path(root))
+        for _ in range(count):
+            store.put(_span())
+        queue.put(None)
+    except BaseException as exc:  # pragma: no cover - asserted in parent process
+        queue.put(repr(exc))
+
+
+def test_cross_process_writers_preserve_every_occurrence(tmp_path: Path) -> None:
+    root = tmp_path / ".clew"
     Store(root)
-    with sqlite3.connect(root / "index.sqlite") as conn:
-        rows = conn.execute("SELECT id FROM spans ORDER BY id").fetchall()
-    assert [r[0] for r in rows] == [s.id for s in spans]
-
-
-# ---------------------------------------------------------------------------
-# iter_spans / iter_traces
-# ---------------------------------------------------------------------------
-
-
-def test_iter_spans_no_filter(store: Store) -> None:
-    """iter_spans() yields every span in the store."""
-    spans = [
-        _make_span(span_id="a" * 64, name="a"),
-        _make_span(span_id="b" * 64, name="b"),
-        _make_span(span_id="c" * 64, name="c"),
+    context = multiprocessing.get_context("spawn")
+    queue: multiprocessing.Queue[object] = context.Queue()
+    processes = [
+        context.Process(target=_process_writer, args=(str(root), 10, queue)) for _ in range(3)
     ]
-    for s in spans:
-        store.put(s)
-    seen = {s.id for s in store.iter_spans()}
-    assert seen == {s.id for s in spans}
+    for process in processes:
+        process.start()
+    for process in processes:
+        process.join(timeout=30)
+        assert process.exitcode == 0
+    assert [queue.get(timeout=2) for _ in processes] == [None, None, None]
+    reopened = Store(root)
+    spans = list(reopened.iter_spans())
+    assert len(spans) == 30
+    assert len({span.id for span in spans}) == 30
 
 
-def test_iter_spans_by_trace_id(store: Store) -> None:
-    """iter_spans(trace_id) returns only spans for that trace."""
-    trace_a = "a" * 64
-    trace_b = "b" * 64
-    span_a1 = _make_span(span_id="1" * 64, trace_id=trace_a, name="a1")
-    span_a2 = _make_span(span_id="2" * 64, trace_id=trace_a, name="a2")
-    span_b1 = _make_span(span_id="3" * 64, trace_id=trace_b, name="b1")
-    for s in (span_a1, span_a2, span_b1):
-        store.put(s)
-    got_a = sorted(s.name for s in store.iter_spans(trace_id=trace_a))
-    got_b = sorted(s.name for s in store.iter_spans(trace_id=trace_b))
-    assert got_a == ["a1", "a2"]
-    assert got_b == ["b1"]
+def test_iter_spans_is_ordered_by_sequence_within_trace(store: Store) -> None:
+    trace_id = uuid4().hex
+    root = _span(trace_id=trace_id, sequence=0)
+    child = _span(trace_id=trace_id, sequence=1, parent_ids=[root.id], name="child")
+    # Children commonly finish and persist before their parents.
+    store.put(child)
+    store.put(root)
+    assert [span.sequence for span in store.iter_spans(trace_id)] == [0, 1]
 
 
-def test_iter_traces(store: Store) -> None:
-    """iter_traces yields the set of distinct trace_ids."""
-    span_a1 = _make_span(span_id="1" * 64, trace_id="a" * 64, name="a1")
-    span_a2 = _make_span(span_id="2" * 64, trace_id="a" * 64, name="a2")
-    span_b1 = _make_span(span_id="3" * 64, trace_id="b" * 64, name="b1")
-    for s in (span_a1, span_a2, span_b1):
-        store.put(s)
-    assert sorted(store.iter_traces()) == ["a" * 64, "b" * 64]
+def test_malformed_ids_cannot_escape_store(store: Store) -> None:
+    with pytest.raises(ValueError, match="invalid span id"):
+        store.get("../../etc/passwd")
 
 
-def test_iter_traces_empty(store: Store) -> None:
-    """An empty store yields no trace ids."""
-    assert list(store.iter_traces()) == []
+@pytest.mark.skipif(os.name == "nt", reason="symlink creation may require Windows privileges")
+def test_store_lock_symlink_is_rejected_without_touching_target(tmp_path: Path) -> None:
+    root = tmp_path / ".clew"
+    Store(root)
+    lock = root / ".store.lock"
+    lock.unlink()
+    target = tmp_path / "outside.txt"
+    target.write_text("do not modify")
+    lock.symlink_to(target)
+
+    with pytest.raises(StoreManifestError, match="store lock"):
+        Store(root)
+
+    assert target.read_text() == "do not modify"
 
 
-# ---------------------------------------------------------------------------
-# Security: span id validation
-# ---------------------------------------------------------------------------
+@pytest.mark.skipif(os.name == "nt", reason="symlink creation may require Windows privileges")
+def test_symlinked_spans_directory_never_redirects_writes(tmp_path: Path) -> None:
+    root = tmp_path / ".clew"
+    outside = tmp_path / "outside"
+    root.mkdir()
+    outside.mkdir()
+    (root / "spans").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(StoreManifestError, match="span store"):
+        Store(root)
+
+    assert list(outside.iterdir()) == []
 
 
-def test_span_path_rejects_path_traversal(tmp_path: Path) -> None:
-    """Span ids that escape the spans/ dir are rejected."""
-    store = Store(tmp_path / ".clew")
-    for bad in ["../../etc/passwd", "../foo", "foo/bar", "", "abc"]:
-        with pytest.raises(ValueError, match="(invalid span id|span id length)"):
-            store._span_path(bad)
+@pytest.mark.skipif(os.name == "nt", reason="symlink creation may require Windows privileges")
+def test_symlinked_span_record_is_rejected(store: Store, tmp_path: Path) -> None:
+    span = _span()
+    target = tmp_path / "outside.json"
+    target.write_text("{}")
+    path = store.root / "spans" / span.id[:2] / f"{span.id}.json"
+    path.parent.mkdir()
+    path.symlink_to(target)
 
-
-def test_span_path_rejects_non_hex(tmp_path: Path) -> None:
-    """Span ids must be lowercase hex."""
-    store = Store(tmp_path / ".clew")
-    for bad in ["xyz12345", "ABCDEF12", "12345g"]:
-        with pytest.raises(ValueError, match="invalid span id"):
-            store._span_path(bad)
-
-
-def test_span_path_accepts_valid_hex(tmp_path: Path) -> None:
-    """A valid 32 or 64 char hex id is accepted."""
-    store = Store(tmp_path / ".clew")
-    p = store._span_path("ab" * 16)
-    assert p.name == ("ab" * 16) + ".jsonl"
-    p = store._span_path("cd" * 32)
-    assert p.name == ("cd" * 32) + ".jsonl"
+    with pytest.raises(SpanIntegrityError, match="regular file"):
+        store.get(span.id)
+    assert target.read_text() == "{}"

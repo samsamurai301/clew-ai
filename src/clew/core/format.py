@@ -1,11 +1,10 @@
-"""OpenTelemetry-compatible projection of :class:`clew.core.models.Span`.
+"""OTel-shaped JSON projection of :class:`clew.core.models.Span`.
 
 The OTel GenAI semantic conventions are the lingua franca of agent
-observability, and clew honors them so that OTel-instrumented code
-"just works" with clew's branching and replay. This module is the
-mapping layer: :func:`to_otel` renders a clew span as a dict an OTel
-consumer can read; :func:`from_otel` parses an OTel-style span dict
-back into a clew :class:`Span`.
+observability. This module borrows their field and attribute vocabulary;
+it is not an OTLP transport or a claim of collector interoperability.
+:func:`to_otel` renders a Clew span as an OTel-shaped dictionary and
+:func:`from_otel` imports that shape with fresh Clew identities.
 
 The mapping is deliberately liberal on read (``from_otel``) and
 explicit on write (``to_otel``): we accept several common OTel span
@@ -15,12 +14,15 @@ shapes and produce a canonical clew dict on the way out.
 from __future__ import annotations
 
 import json
+import os
+import stat
+import uuid
 from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from clew.core.models import Span, SpanStatus, SpanType
+from clew.core.models import Span, SpanStatus, SpanType, Trace
 
 #: A frozenset for fast membership tests on the four SpanType values.
 _SPAN_TYPES: frozenset[str] = frozenset(t.value for t in SpanType)
@@ -66,9 +68,7 @@ def _parse_time(value: Any) -> datetime:
     if isinstance(value, (int, float)):
         return datetime.fromtimestamp(float(value), tz=UTC)
     if not isinstance(value, str):
-        raise ValueError(
-            f"Cannot parse timestamp from value of type {type(value).__name__!r}"
-        )
+        raise ValueError(f"Cannot parse timestamp from value of type {type(value).__name__!r}")
     s = value.strip()
     if s.endswith("Z"):
         s = s[:-1] + "+00:00"
@@ -143,8 +143,10 @@ def _extract_status(payload: Any) -> tuple[SpanStatus, str | None]:
         return SpanStatus.OK, None
     if code == "ERROR":
         return SpanStatus.ERROR, message or "error"
+    if code == "SKIPPED":
+        return SpanStatus.SKIPPED, None
     if code == "RUNNING":
-        return SpanStatus.RUNNING, None
+        return SpanStatus.ERROR, message or "external span was not finalized"
     # "OK", "UNSET", or anything unrecognized defaults to OK.
     return SpanStatus.OK, None
 
@@ -176,6 +178,8 @@ def to_otel(span: Span) -> dict[str, Any]:
         "parent_span_id": span.parent_ids[0] if span.parent_ids else None,
         "input": span.input,
         "output": span.output,
+        "clew.sequence": span.sequence,
+        "clew.parent_span_ids": list(span.parent_ids),
     }
     if span.metadata is not None:
         result["metadata"] = dict(span.metadata)
@@ -193,9 +197,7 @@ def from_otel(otel_span: Mapping[str, Any]) -> Span:
     a sensible default.
     """
     if not isinstance(otel_span, Mapping):
-        raise TypeError(
-            f"from_otel expected a mapping, got {type(otel_span).__name__!r}"
-        )
+        raise TypeError(f"from_otel expected a mapping, got {type(otel_span).__name__!r}")
     attributes: dict[str, Any] = dict(otel_span.get("attributes") or {})
 
     # Name: prefer the OTel canonical "name" key, then gen_ai.operation.name.
@@ -214,9 +216,7 @@ def from_otel(otel_span: Mapping[str, Any]) -> Span:
     if start_value is None:
         start_value = otel_span.get("started_at")
     if start_value is None:
-        raise ValueError(
-            "OTel span must have a 'start_time' (or 'started_at') field"
-        )
+        raise ValueError("OTel span must have a 'start_time' (or 'started_at') field")
     started_at = _parse_time(start_value)
     end_value = otel_span.get("end_time")
     if end_value is None:
@@ -225,11 +225,10 @@ def from_otel(otel_span: Mapping[str, Any]) -> Span:
 
     status, error = _extract_status(otel_span.get("status"))
 
-    # Identity: OTel's span/trace ids are typically 16-byte hex; clew
-    # uses 32-byte hex. We store whatever the caller gave us; the
-    # hash derivation in core/models.Span uses the canonical form.
-    trace_id = str(otel_span.get("trace_id") or "")
-    span_id = str(otel_span.get("span_id") or otel_span.get("id") or "")
+    # Clew occurrence ids are independent from transport identities. Preserve
+    # source identifiers as provenance and allocate fresh v2 UUID identities.
+    source_trace_id = str(otel_span.get("trace_id") or "")
+    source_span_id = str(otel_span.get("span_id") or otel_span.get("id") or "")
 
     parent_id = otel_span.get("parent_span_id")
     if parent_id is None:
@@ -238,12 +237,20 @@ def from_otel(otel_span: Mapping[str, Any]) -> Span:
         context = otel_span.get("context")
         if isinstance(context, Mapping):
             parent_id = context.get("parent_span_id")
-    parent_ids: list[str] = [str(parent_id)] if parent_id else []
+    source_parent_ids = otel_span.get("clew.parent_span_ids")
+    if not isinstance(source_parent_ids, list):
+        source_parent_ids = [str(parent_id)] if parent_id else []
+
+    metadata = dict(otel_span.get("metadata") or {})
+    metadata["otel.source_trace_id"] = source_trace_id
+    metadata["otel.source_span_id"] = source_span_id
+    metadata["otel.source_parent_ids"] = [str(item) for item in source_parent_ids]
 
     return Span(
-        id=span_id,
-        trace_id=trace_id,
-        parent_ids=parent_ids,
+        id=uuid.uuid4().hex,
+        trace_id=uuid.uuid4().hex,
+        parent_ids=[],
+        sequence=int(otel_span.get("clew.sequence", 0)),
         type=span_type,
         name=name,
         attributes=attributes,
@@ -253,7 +260,7 @@ def from_otel(otel_span: Mapping[str, Any]) -> Span:
         ended_at=ended_at,
         status=status,
         error=error,
-        metadata=otel_span.get("metadata"),
+        metadata=metadata,
     )
 
 
@@ -295,13 +302,14 @@ def export_ndjson(trace_id: str, spans: Iterable[Span]) -> str:
 #: 64MB is generous for a single trace; if you need more, pass
 #: ``max_bytes`` to :func:`import_ndjson`.
 DEFAULT_MAX_NDJSON_BYTES: int = 64 * 1024 * 1024
+DEFAULT_MAX_NDJSON_SPANS: int = 100_000
 
 
 def import_ndjson(
     text: str,
     *,
     max_bytes: int = DEFAULT_MAX_NDJSON_BYTES,
-    max_spans: int = 1_000_000,
+    max_spans: int = DEFAULT_MAX_NDJSON_SPANS,
 ) -> tuple[str, list[Span]]:
     """Parse an NDJSON trace file back into ``(trace_id, [Span])``.
 
@@ -311,42 +319,117 @@ def import_ndjson(
     input or if the input exceeds ``max_bytes`` / ``max_spans``.
     """
     if len(text.encode("utf-8")) > max_bytes:
-        raise ValueError(
-            f"NDJSON input exceeds {max_bytes} bytes (use max_bytes to override)"
-        )
-    trace_id: str | None = None
-    spans: list[Span] = []
+        raise ValueError(f"NDJSON input exceeds {max_bytes} bytes (use max_bytes to override)")
+    source_trace_id: str | None = None
+    declared_span_count: int | None = None
+    saw_header = False
+    payloads: list[Mapping[str, Any]] = []
     for n, raw in enumerate(text.splitlines(), start=1):
         raw = raw.strip()
         if not raw:
             continue
         try:
             obj = json.loads(raw)
-        except json.JSONDecodeError as exc:
+        except (json.JSONDecodeError, RecursionError) as exc:
             raise ValueError(f"line {n} is not valid JSON: {exc}") from exc
         if not isinstance(obj, Mapping):
             raise ValueError(f"line {n} is not a JSON object")
         kind = obj.get("_kind")
         if kind == "trace":
+            if saw_header or payloads:
+                raise ValueError(f"line {n}: trace header must appear exactly once before spans")
             tid = obj.get("trace_id")
             if not isinstance(tid, str):
                 raise ValueError(f"line {n}: trace header is missing trace_id")
-            trace_id = tid
+            count = obj.get("span_count")
+            if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+                raise ValueError(f"line {n}: trace header has invalid span_count")
+            source_trace_id = tid
+            declared_span_count = count
+            saw_header = True
             continue
         if kind is not None and kind != "span":
             raise ValueError(f"line {n}: unknown _kind {kind!r}")
-        if len(spans) >= max_spans:
+        if len(payloads) >= max_spans:
             raise ValueError(
                 f"NDJSON input has more than {max_spans} spans (use max_spans to override)"
             )
-        span = from_otel(obj)
-        spans.append(span)
-        if trace_id is None:
-            # Bare OTel form: take the first span's trace_id.
-            trace_id = span.trace_id
-    if trace_id is None:
+        payloads.append(obj)
+        raw_trace = obj.get("trace_id")
+        if isinstance(raw_trace, str):
+            if source_trace_id is None:
+                source_trace_id = raw_trace
+            elif raw_trace != source_trace_id:
+                raise ValueError(
+                    f"line {n}: span trace_id {raw_trace!r} does not match {source_trace_id!r}"
+                )
+    if not payloads:
         raise ValueError("no spans found in NDJSON input")
-    return trace_id, spans
+    if declared_span_count is not None and declared_span_count != len(payloads):
+        raise ValueError(
+            f"trace header declares {declared_span_count} spans but file contains {len(payloads)}"
+        )
+
+    new_trace_id = uuid.uuid4().hex
+    source_ids: list[str] = []
+    seen_source_ids: set[str] = set()
+    for index, payload in enumerate(payloads):
+        source_id = str(payload.get("span_id") or payload.get("id") or index)
+        if source_id in seen_source_ids:
+            raise ValueError(f"duplicate source span id in NDJSON: {source_id!r}")
+        source_ids.append(source_id)
+        seen_source_ids.add(source_id)
+    id_map = {source_id: uuid.uuid4().hex for source_id in source_ids}
+
+    spans: list[Span] = []
+    for index, (payload, source_id) in enumerate(zip(payloads, source_ids, strict=True)):
+        parsed = from_otel(payload)
+        raw_parents = payload.get("clew.parent_span_ids")
+        if not isinstance(raw_parents, list):
+            parent = payload.get("parent_span_id") or payload.get("parent_id")
+            raw_parents = [parent] if parent else []
+        missing = [str(parent) for parent in raw_parents if str(parent) not in id_map]
+        if missing:
+            raise ValueError(f"NDJSON span {source_id!r} references missing parents {missing}.")
+        raw_sequence = payload.get("clew.sequence", index)
+        if isinstance(raw_sequence, bool):
+            raise ValueError(f"NDJSON span {source_id!r} has invalid boolean sequence")
+        try:
+            sequence = int(raw_sequence)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(
+                f"NDJSON span {source_id!r} has invalid sequence {raw_sequence!r}"
+            ) from exc
+        spans.append(
+            Span(
+                id=id_map[source_id],
+                trace_id=new_trace_id,
+                parent_ids=[id_map[str(parent)] for parent in raw_parents],
+                sequence=sequence,
+                type=parsed.type,
+                name=parsed.name,
+                attributes=dict(parsed.attributes),
+                input=parsed.input,
+                output=parsed.output,
+                started_at=parsed.started_at,
+                ended_at=parsed.ended_at,
+                status=parsed.status,
+                error=parsed.error,
+                metadata=parsed.metadata,
+            )
+        )
+    roots = [span for span in spans if not span.parent_ids]
+    if len(roots) != 1:
+        raise ValueError(f"NDJSON trace must contain exactly one root; found {len(roots)}.")
+    try:
+        trace = Trace(
+            trace_id=new_trace_id,
+            root_span_id=roots[0].id,
+            spans=spans,
+        )
+    except ValueError as exc:
+        raise ValueError(f"invalid NDJSON trace topology: {exc}") from exc
+    return new_trace_id, trace.spans
 
 
 def write_ndjson(path: Path, trace_id: str, spans: Iterable[Span]) -> int:
@@ -360,22 +443,60 @@ def read_ndjson(
     path: Path,
     *,
     max_bytes: int = DEFAULT_MAX_NDJSON_BYTES,
-    max_spans: int = 1_000_000,
+    max_spans: int = DEFAULT_MAX_NDJSON_SPANS,
 ) -> tuple[str, list[Span]]:
     """Read spans from an NDJSON file; returns ``(trace_id, [Span])``.
 
     Enforces the same ``max_bytes`` / ``max_spans`` caps as
     :func:`import_ndjson` to refuse zip/json bombs.
     """
-    if path.stat().st_size > max_bytes:
-        raise ValueError(
-            f"file {path} exceeds {max_bytes} bytes (use max_bytes to override)"
-        )
-    return import_ndjson(path.read_text(encoding="utf-8"), max_bytes=max_bytes, max_spans=max_spans)
+    try:
+        before = path.lstat()
+    except OSError as exc:
+        raise ValueError(f"cannot inspect NDJSON file {path}: {exc}") from exc
+    if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+        raise ValueError(f"NDJSON path {path} must be a regular file with one link")
+    if before.st_size > max_bytes:
+        raise ValueError(f"file {path} exceeds {max_bytes} bytes (use max_bytes to override)")
+
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        raise ValueError(f"cannot safely open NDJSON file {path}: {exc}") from exc
+    try:
+        opened = os.fstat(fd)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_nlink != 1
+            or (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino)
+        ):
+            raise ValueError(f"NDJSON file {path} changed while being opened")
+        chunks: list[bytes] = []
+        remaining = max_bytes + 1
+        while remaining > 0:
+            chunk = os.read(fd, min(1024 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+    finally:
+        os.close(fd)
+    payload = b"".join(chunks)
+    if len(payload) > max_bytes:
+        raise ValueError(f"file {path} exceeds {max_bytes} bytes (use max_bytes to override)")
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"NDJSON file {path} is not valid UTF-8: {exc}") from exc
+    return import_ndjson(text, max_bytes=max_bytes, max_spans=max_spans)
 
 
 __all__ = [
     "DEFAULT_MAX_NDJSON_BYTES",
+    "DEFAULT_MAX_NDJSON_SPANS",
     "export_ndjson",
     "from_otel",
     "import_ndjson",

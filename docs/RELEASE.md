@@ -1,55 +1,55 @@
-# Release notes
+# 1.1.5 release checklist
 
-## v1.1.0 — 2026-07-13
+Clew 1.1.5 is a breaking corrective Beta release. Release only from a clean `main` commit
+after every automated and human gate below passes.
 
-The "ecosystem" release. Beyond the v1.0.0 core, v1.1.0 ships
-the integrations that make clew a real part of an agent
-developer's toolchain.
+## Containment before release
 
-### New
+- Revoke the PyPI token that appeared in the working directory and conversation history.
+- Confirm `token.txt` is absent from the repository and local workspace.
+- Yank PyPI 1.1.4 with the reason: **trace identity collisions and incorrect project
+  links; use 1.1.5 or later**.
+- Leave the existing `v1.1.4` tag unchanged. Record that it does not reproduce the manually
+  uploaded artifact.
+- Make `main` the GitHub default branch and enable private vulnerability reporting.
 
-- **MCP server** (`clew mcp`). Expose your clew store to
-  Claude Desktop, Cursor, Cline, and any other MCP-compatible
-  client. 12 tools (list/get/search/branch/checkout/replay/
-  diff/doctor/query) plus 2 resources (store://info, trace://id).
-  See the [MCP integration guide](integrations/mcp.md).
-- **HTML trace reports** (`clew show <id> --html <path>`).
-  Self-contained, interactive, dark-themed, works offline.
-  Email a trace, gist it, drop it in Slack.
-- **LangChain callback handler**
-  (`clew.integrations.langchain.ClewCallbackHandler`).
-  Drop-in: pass to any LangChain `invoke(..., config={"callbacks": [cb]})`
-  and every chain / LLM / tool call becomes a clew span.
-- **GitHub Action** (`clew/clew/.github/actions/clew-trace@main`).
-  Wrap any CI step under `clew trace` and download the trace
-  as an artifact.
+These are account-level actions and cannot be proven by repository code alone.
 
-### Improved
+## Automated gates
 
-- **Tracer manual lifecycle** — `Tracer._begin(name=)` and
-  `Tracer._end(span_id=)` now exist for integrations that
-  don't use Python's `with` syntax. The LangChain handler is
-  the first consumer.
-- **Store auto-creates a default `main` ref** on first open
-  (no more dangling HEAD on a fresh store).
-- **The `mcp` extra** is now part of the default install for
-  devs (`uv sync --group dev` pulls it in automatically).
-- **GitHub issue + PR templates** and a `FUNDING.yml` for
-  sponsors.
+```bash
+uv sync --all-extras --group docs
+uv run ruff format --check .
+uv run ruff check .
+uv run mypy --strict src
+uv run pytest --cov=clew --cov-branch --cov-report=term-missing
+uv run mkdocs build --strict
+uv run pip-audit
+uv build
+uv run twine check dist/clew_ai-1.1.5*
+```
 
-### Verified
+CI additionally verifies Python 3.11–3.14 on Linux, branch coverage of at least 85%,
+CodeQL, secret scanning, wheel installation on macOS and Windows, v2 bundle/NDJSON fuzz
+tests, and the 10,000-span performance contract.
 
-- 284 tests passing (was 246 in v1.0.0)
-- ruff clean, mypy --strict clean
-- 87% line coverage
-- New scaling tests prove the store handles 5,000 spans and
-  100 distinct traces without breaking a sweat.
+Inspect both wheel and sdist. Confirm metadata, the `clew` and `clew-ai` entry points, and
+`clew/py.typed`. Install each artifact in a fresh environment and run `clew demo`.
 
-## v1.0.0 — 2026-XX-XX
+## Human gate
 
-First stable release. See the [changelog](changelog.md) for
-the full list of features from 0.1.0 → 1.0.0.
+Before public release, at least ten external Python-agent developers must complete the
+private demo, at least five must use Clew on their own agent, and no P0/P1 finding may
+remain unresolved. Record evidence outside the runtime; 1.1.5 sends no adoption telemetry.
 
-## v0.1.0 — 2026-01-XX
+## Publication
 
-Initial MVP.
+1. Publish the exact candidate commit to TestPyPI through trusted publishing.
+2. Install from TestPyPI and repeat the complete user journey.
+3. Confirm version 1.1.5, changelog, compatibility notice, and tag alignment.
+4. Push the tag. CI rebuilds and verifies the tag, publishes through trusted publishing,
+   deploys GitHub Pages, and creates the GitHub release.
+5. Verify PyPI installation and every public link from a clean machine.
+
+Never replace an uploaded artifact. If a critical regression is found, yank 1.1.5 and
+publish 1.1.6.

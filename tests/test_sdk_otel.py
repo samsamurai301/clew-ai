@@ -5,22 +5,16 @@ a method on the client object. We can't depend on the real clients
 being installed, so we build a tiny fake client class and verify
 the wrapping behavior.
 """
+
 from __future__ import annotations
 
-import asyncio
-import importlib
-import sys
-import types
 from datetime import UTC, datetime
 from pathlib import Path
-from uuid import uuid4
 
 import pytest
 
 from clew.core.models import Span, SpanStatus, SpanType
 from clew.core.store import Store
-from clew.core.trace import TraceStore
-
 
 # ---------------------------------------------------------------------------
 # Fake client
@@ -74,6 +68,7 @@ class _FakeAnthropicClient:
 def test_to_otel_round_trip(tmp_path: Path) -> None:
     """to_otel and from_otel are inverses for the basic fields."""
     from clew.sdk.otel import from_otel, to_otel
+
     span = Span(
         id="a" * 32,
         trace_id="b" * 32,
@@ -100,6 +95,7 @@ def test_to_otel_round_trip(tmp_path: Path) -> None:
 def test_to_otel_span_helper(tmp_path: Path) -> None:
     """to_otel_span returns the same dict as to_otel."""
     from clew.sdk.otel import to_otel, to_otel_span
+
     span = Span(
         id="a" * 32,
         trace_id="b" * 32,
@@ -116,6 +112,7 @@ def test_to_otel_span_helper(tmp_path: Path) -> None:
 def test_from_otel_span_helper(tmp_path: Path) -> None:
     """from_otel_span returns the same Span as from_otel."""
     from clew.sdk.otel import from_otel, from_otel_span
+
     span = Span(
         id="a" * 32,
         trace_id="b" * 32,
@@ -127,6 +124,7 @@ def test_from_otel_span_helper(tmp_path: Path) -> None:
         status=SpanStatus.OK,
     )
     from clew.sdk.otel import to_otel
+
     d = to_otel(span)
     s1 = from_otel(d)
     s2 = from_otel_span(d)
@@ -183,6 +181,19 @@ def test_instrument_openai_idempotent(tmp_path: Path, monkeypatch) -> None:
     # (re-instrumenting is no-op so the call is recorded once)
     out = client.chat.completions.create(model="gpt-4o")
     assert out == "fake-completion"
+
+
+def test_reinstrumenting_with_different_tracer_is_rejected(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    from clew.sdk.otel import instrument_openai
+    from clew.sdk.tracer import Tracer
+
+    client = _FakeOpenAIClient()
+    first = Tracer(cwd=tmp_path / "first")
+    second = Tracer(cwd=tmp_path / "second")
+    instrument_openai(client, tracer=first)
+    with pytest.raises(ValueError, match="different Clew Tracer"):
+        instrument_openai(client, tracer=second)
 
 
 def test_instrument_openai_no_chat_attr_is_noop(tmp_path: Path, monkeypatch) -> None:
@@ -263,9 +274,21 @@ def test_instrument_openai_records_exception(tmp_path: Path, monkeypatch) -> Non
     from clew.sdk.tracer import Tracer
 
     class _Boom:
-        chat = type("C", (), {"completions": type("K", (), {
-            "create": staticmethod(lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("boom")))
-        })()})()
+        chat = type(
+            "C",
+            (),
+            {
+                "completions": type(
+                    "K",
+                    (),
+                    {
+                        "create": staticmethod(
+                            lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("boom"))
+                        )
+                    },
+                )()
+            },
+        )()
 
     client = _Boom()
     tracer = Tracer(cwd=tmp_path)

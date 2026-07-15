@@ -2,7 +2,7 @@
 
 ## Requirements
 
-- **Python 3.11 or newer.** clew uses modern type syntax
+- **Python 3.11 through 3.14.** clew uses modern type syntax
   (`str | None`, `StrEnum`, structural pattern matching) and
   Pydantic v2, all of which require 3.11+.
 - **Linux, macOS, or Windows.** clew is pure Python with
@@ -15,42 +15,42 @@
 === "uv"
 
     ```bash
-    uv add clew
+    uv add clew-ai
     ```
 
 === "pip"
 
     ```bash
-    pip install clew
+    pip install clew-ai
     ```
 
 === "poetry"
 
     ```bash
-    poetry add clew
-    ```
-
-=== "conda"
-
-    ```bash
-    conda install -c conda-forge clew  # coming soon
+    poetry add clew-ai
     ```
 
 ## Optional extras
 
 ```bash
 # MCP server (Claude Desktop, Cursor, Cline)
-uv add 'clew[mcp]'
+uv add 'clew-ai[mcp]'
 
-# Everything (MCP + future optional deps)
-uv add 'clew[all]'
+# Textual TUI, LangChain, or provider clients
+uv add 'clew-ai[tui]'
+uv add 'clew-ai[langchain]'
+uv add 'clew-ai[openai]'
+uv add 'clew-ai[anthropic]'
+
+# All optional integrations
+uv add 'clew-ai[all]'
 ```
 
 ## Verify
 
 ```bash
 clew version
-# clew 1.1.0
+# clew 1.1.5
 ```
 
 If you see the version, you're good. The first time you run

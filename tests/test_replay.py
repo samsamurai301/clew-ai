@@ -6,8 +6,14 @@ from pathlib import Path
 
 import pytest
 
-from clew.core.models import Span
-from clew.core.replay import MockExecutor, RecordingExecutor, ReplayEngine
+from clew.core.models import Span, SpanStatus
+from clew.core.replay import (
+    MockExecutor,
+    RecordingExecutor,
+    ReplayContext,
+    ReplayEngine,
+    ReplayResult,
+)
 from clew.core.store import Store
 from clew.core.trace import TraceStore
 
@@ -26,7 +32,7 @@ def _build_simple_trace(ts: TraceStore) -> tuple[str, list[Span]]:
     ts.add_span(root)
     ts.add_span(child)
     ts.add_span(leaf)
-    return "t1", [root, child, leaf]
+    return root.trace_id, [root, child, leaf]
 
 
 @pytest.mark.anyio
@@ -84,7 +90,7 @@ async def test_replay_recording_executor_captures_output(tmp_path: Path) -> None
 
     async def fn(span: Span, ctx):  # type: ignore[no-untyped-def]
         captured.append((span.name, span.output))
-        return ("fresh-" + span.name, {"replayed": True})
+        return ReplayResult(output="fresh-" + span.name, attributes={"replayed": True})
 
     engine = ReplayEngine(ts, executor=RecordingExecutor(fn))
     new_trace = await engine.replay(trace_id)
@@ -129,3 +135,73 @@ async def test_replay_with_invalid_from_span_raises(tmp_path: Path) -> None:
     engine = ReplayEngine(ts, executor=MockExecutor())
     with pytest.raises(KeyError):
         await engine.replay(trace_id, from_span_id="not-a-real-id")
+
+
+@pytest.mark.anyio
+async def test_every_replay_parent_belongs_to_new_trace(tmp_path: Path) -> None:
+    ts = _setup(tmp_path)
+    trace_id, spans = _build_simple_trace(ts)
+    replayed = await ReplayEngine(ts).replay(trace_id, from_span_id=spans[1].id)
+    ids = {span.id for span in replayed.spans}
+    original_ids = {span.id for span in spans}
+    assert ids.isdisjoint(original_ids)
+    assert all(parent in ids for span in replayed.spans for parent in span.parent_ids)
+
+
+@pytest.mark.anyio
+async def test_executor_receives_finalized_new_parent_chain(tmp_path: Path) -> None:
+    ts = _setup(tmp_path)
+    trace_id, _ = _build_simple_trace(ts)
+    seen: dict[str, tuple[Span, ...]] = {}
+
+    def execute(span: Span, context: ReplayContext) -> ReplayResult:
+        seen[span.name] = context.parent_chain
+        return ReplayResult(output=span.output)
+
+    replayed = await ReplayEngine(ts, RecordingExecutor(execute)).replay(trace_id)
+    assert seen["root"] == ()
+    assert [span.name for span in seen["child"]] == ["root"]
+    assert [span.name for span in seen["leaf"]] == ["root", "child"]
+    assert all(
+        parent.trace_id == replayed.trace_id and parent.content_hash and parent.status is not None
+        for chain in seen.values()
+        for parent in chain
+    )
+
+
+@pytest.mark.anyio
+async def test_executor_failure_persists_error_and_skips_descendants(
+    tmp_path: Path,
+) -> None:
+    ts = _setup(tmp_path)
+    trace_id, _ = _build_simple_trace(ts)
+
+    async def execute(span: Span, context: ReplayContext) -> ReplayResult:
+        del context
+        if span.name == "child":
+            raise RuntimeError("replay exploded")
+        return ReplayResult(output=span.output)
+
+    replayed = await ReplayEngine(ts, RecordingExecutor(execute)).replay(trace_id)
+    by_name = {span.name: span for span in replayed.spans}
+    assert by_name["root"].status is SpanStatus.OK
+    assert by_name["child"].status is SpanStatus.ERROR
+    assert "replay exploded" in (by_name["child"].error or "")
+    assert by_name["leaf"].status is SpanStatus.SKIPPED
+    assert by_name["leaf"].attributes["replay.skip_reason"] == "dependency failed"
+
+
+@pytest.mark.anyio
+async def test_multi_parent_replay_preserves_complete_topology(tmp_path: Path) -> None:
+    ts = _setup(tmp_path)
+    root = make_span(name="root", trace_id="join")
+    left = make_span(name="side", trace_id="join", parent_ids=[root.id])
+    right = make_span(name="side", trace_id="join", parent_ids=[root.id])
+    join = make_span(name="join", trace_id="join", parent_ids=[left.id, right.id])
+    for span in (join, right, left, root):
+        ts.add_span(span)
+    replayed = await ReplayEngine(ts).replay(root.trace_id, from_span_id=join.id)
+    by_name = {span.name: span for span in replayed.spans if span.name != "side"}
+    assert len(by_name["join"].parent_ids) == 2
+    ids = {span.id for span in replayed.spans}
+    assert set(by_name["join"].parent_ids) <= ids

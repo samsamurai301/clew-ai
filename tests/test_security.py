@@ -4,12 +4,11 @@ These tests don't replace a real audit (see SECURITY.md), but they
 catch the most common regressions: path traversal in user-controlled
 strings, accidental pickle/marshal, and command injection.
 """
+
 from __future__ import annotations
 
 import io
 import json
-import os
-import pickle
 import re
 import subprocess
 import sys
@@ -20,16 +19,11 @@ from pathlib import Path
 import pytest
 
 from clew.core.bundle import (
-    DEFAULT_MAX_BUNDLE_BYTES,
-    build_bundle,
-    extract_spans,
     generate_keypair,
-    load_private_key,
     load_public_key,
     verify_bundle,
 )
-from clew.core.models import Span, SpanStatus, SpanType, Trace
-
+from clew.core.models import Span, SpanStatus, SpanType
 
 # ---------------------------------------------------------------------------
 # No-pickle guarantee
@@ -55,7 +49,10 @@ def test_no_unsafe_yaml_in_clew() -> None:
     src_dir = Path(__file__).resolve().parent.parent / "src" / "clew"
     for py in src_dir.rglob("*.py"):
         text = py.read_text()
-        if re.search(r"yaml\.load\s*\(", text) and "safe_load" not in text.split("yaml.load")[1][:50]:
+        if (
+            re.search(r"yaml\.load\s*\(", text)
+            and "safe_load" not in text.split("yaml.load")[1][:50]
+        ):
             pytest.fail(f"{py} uses yaml.load without safe_load")
 
 
@@ -84,7 +81,12 @@ def test_bundle_rejects_embedded_symlink_to_etc(tmp_path: Path) -> None:
     bad = tmp_path / "b.tgz"
     with tarfile.open(bad, "w:gz") as tar:
         # Manifest entry (looks legitimate)
-        manifest = {"format": "clew-bundle", "version": 1, "trace_id": "x" * 32, "spans_sha256": "0" * 64}
+        manifest = {
+            "format": "clew-bundle",
+            "version": 1,
+            "trace_id": "x" * 32,
+            "spans_sha256": "0" * 64,
+        }
         body = json.dumps(manifest).encode()
         info = tarfile.TarInfo(name="manifest.json")
         info.size = len(body)
@@ -102,7 +104,11 @@ def test_bundle_rejects_embedded_symlink_to_etc(tmp_path: Path) -> None:
         tar.addfile(link)
     v = verify_bundle(bad, load_public_key(_bytes_to_tmpfile(pub)))
     assert v.valid is False
-    assert "disallowed" in (v.reason or "").lower() or "symlink" in (v.reason or "").lower() or "link" in (v.reason or "").lower()
+    assert (
+        "disallowed" in (v.reason or "").lower()
+        or "symlink" in (v.reason or "").lower()
+        or "link" in (v.reason or "").lower()
+    )
 
 
 def test_bundle_size_limit_cannot_be_bypassed(tmp_path: Path) -> None:
@@ -135,13 +141,19 @@ def test_clew_trace_does_not_invoke_shell() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         result = subprocess.run(
             [sys.executable, "-m", "clew", "init", "."],
-            cwd=tmp, capture_output=True, text=True, timeout=10,
+            cwd=tmp,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         assert result.returncode == 0
         # Now run a command that would do something dangerous if shell=True
         result = subprocess.run(
             [sys.executable, "-m", "clew", "trace", "--", "python3", "-c", "print('ok')"],
-            cwd=tmp, capture_output=True, text=True, timeout=10,
+            cwd=tmp,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         assert result.returncode == 0
 
@@ -152,22 +164,20 @@ def test_clew_trace_does_not_invoke_shell() -> None:
 
 
 def test_cannot_store_span_with_malicious_id(tmp_path: Path) -> None:
-    """Storing a span with a non-hex id is refused at the path level."""
-    from clew.core.store import Store
-    store = Store(tmp_path / ".clew")
-    bad = Span(
-        id="../../etc/passwd",
-        trace_id="0" * 32,
-        parent_ids=[],
-        type=SpanType.OBSERVATION,
-        name="x",
-        started_at=__import__("datetime").datetime(2024, 1, 1, tzinfo=__import__("datetime").UTC),
-        ended_at=__import__("datetime").datetime(2024, 1, 1, tzinfo=__import__("datetime").UTC),
-        status=SpanStatus.OK,
-    )
-    # put() goes through _span_path; the bad id should raise
-    with pytest.raises(ValueError, match="(invalid span id|span id length)"):
-        store.put(bad)
+    """A path-like id is rejected before it can reach store path handling."""
+    with pytest.raises(ValueError, match="id"):
+        Span(
+            id="../../etc/passwd",
+            trace_id="0" * 32,
+            parent_ids=[],
+            type=SpanType.OBSERVATION,
+            name="x",
+            started_at=__import__("datetime").datetime(
+                2024, 1, 1, tzinfo=__import__("datetime").UTC
+            ),
+            ended_at=__import__("datetime").datetime(2024, 1, 1, tzinfo=__import__("datetime").UTC),
+            status=SpanStatus.OK,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -178,7 +188,7 @@ def test_cannot_store_span_with_malicious_id(tmp_path: Path) -> None:
 def _bytes_to_tmpfile(data: bytes) -> Path:
     """Write ``data`` to a temp file and return the path."""
     import tempfile
-    f = tempfile.NamedTemporaryFile(delete=False)
-    f.write(data)
-    f.close()
-    return Path(f.name)
+
+    with tempfile.NamedTemporaryFile(delete=False) as file:
+        file.write(data)
+        return Path(file.name)

@@ -27,7 +27,6 @@ from pathlib import Path
 
 from clew.core.models import Span, SpanStatus, SpanType
 from clew.core.store import Store
-from clew.utils.hash import span_hash
 
 
 def run_and_record(
@@ -41,34 +40,14 @@ def run_and_record(
 ) -> Span:
     """Run ``argv`` and write a single span summarizing the result.
 
-    The span is content-addressed: two runs with the same argv and
-    cwd share an id (modulo timestamps, which are excluded from the
-    hash by :func:`clew.utils.hash.span_hash`).
+    Every run receives a fresh occurrence id and trace id.
     """
     if not argv:
         raise ValueError("argv must contain at least one element")
     span_name = name or Path(argv[0]).name or "subprocess"
-    # Build a deterministic hash from the stable parts.
-    sentinel = datetime(1970, 1, 1, tzinfo=UTC)
-    # ``model_construct`` skips validation — we explicitly want the
-    # empty id here, since we set the real id from ``span_hash``
-    # below.
-    partial = Span.model_construct(
-        id="",
-        trace_id=uuid.uuid4().hex,  # fresh per run
-        parent_ids=[],
-        type=SpanType.OBSERVATION,
-        name=span_name,
-        attributes={},
-        input={"argv": list(argv), "cwd": str(cwd)},
-        output=None,
-        started_at=sentinel,
-        ended_at=sentinel,
-        status=SpanStatus.OK,
-    )
-    sid = span_hash(partial)
-    now = datetime.now(UTC)
-    span = partial.model_copy(update={"id": sid, "started_at": now})
+    span_id = uuid.uuid4().hex
+    trace_id = uuid.uuid4().hex
+    started_at = datetime.now(UTC)
     started = time.monotonic()
     try:
         proc = subprocess.run(
@@ -81,19 +60,26 @@ def run_and_record(
         )
     except subprocess.TimeoutExpired as exc:
         ended = datetime.now(UTC)
-        err_span = span.model_copy(
-            update={
-                "ended_at": ended,
-                "status": SpanStatus.ERROR,
-                "error": f"timeout after {timeout_s}s",
-                "attributes": {
-                    "argv": list(argv),
-                    "cwd": str(cwd),
-                    "duration_s": time.monotonic() - started,
-                    "stdout_tail": _tail(str(exc.stdout or "")),
-                    "stderr_tail": _tail(str(exc.stderr or "")),
-                },
-            }
+        err_span = Span(
+            id=span_id,
+            trace_id=trace_id,
+            parent_ids=[],
+            sequence=0,
+            type=SpanType.OBSERVATION,
+            name=span_name,
+            input={"argv": list(argv), "cwd": str(cwd)},
+            output=None,
+            started_at=started_at,
+            ended_at=ended,
+            status=SpanStatus.ERROR,
+            error=f"timeout after {timeout_s}s",
+            attributes={
+                "argv": list(argv),
+                "cwd": str(cwd),
+                "duration_s": time.monotonic() - started,
+                "stdout_tail": _tail(str(exc.stdout or "")),
+                "stderr_tail": _tail(str(exc.stderr or "")),
+            },
         )
         store.put(err_span)
         return err_span
@@ -104,25 +90,28 @@ def run_and_record(
     last_line = _last_nonempty_line(stdout)
     err_msg: str | None = None
     if proc.returncode != 0:
-        err_msg = (
-            f"exit {proc.returncode}: "
-            f"{_last_nonempty_line(stderr) or '(no stderr)'}"
-        )
-    final = span.model_copy(
-        update={
-            "ended_at": ended,
-            "status": status,
-            "error": err_msg,
-            "output": last_line,
-            "attributes": {
-                "argv": list(argv),
-                "cwd": str(cwd),
-                "duration_s": time.monotonic() - started,
-                "returncode": proc.returncode,
-                "stdout_tail": _tail(stdout),
-                "stderr_tail": _tail(stderr),
-            },
-        }
+        err_msg = f"exit {proc.returncode}: {_last_nonempty_line(stderr) or '(no stderr)'}"
+    final = Span(
+        id=span_id,
+        trace_id=trace_id,
+        parent_ids=[],
+        sequence=0,
+        type=SpanType.OBSERVATION,
+        name=span_name,
+        input={"argv": list(argv), "cwd": str(cwd)},
+        output=last_line,
+        started_at=started_at,
+        ended_at=ended,
+        status=status,
+        error=err_msg,
+        attributes={
+            "argv": list(argv),
+            "cwd": str(cwd),
+            "duration_s": time.monotonic() - started,
+            "returncode": proc.returncode,
+            "stdout_tail": _tail(stdout),
+            "stderr_tail": _tail(stderr),
+        },
     )
     store.put(final)
     return final

@@ -33,7 +33,9 @@ USE_ANTHROPIC = bool(os.environ.get("ANTHROPIC_API_KEY"))
 USE_MOCK = not (USE_OPENAI or USE_ANTHROPIC)
 
 if USE_MOCK:
-    print(">>> no API key found; using mock backend (set OPENAI_API_KEY or ANTHROPIC_API_KEY for real LLM calls)")
+    print(
+        ">>> no API key found; using mock backend (set OPENAI_API_KEY or ANTHROPIC_API_KEY for real LLM calls)"
+    )
     BACKEND = "mock"
 elif USE_OPENAI:
     print(">>> using OpenAI")

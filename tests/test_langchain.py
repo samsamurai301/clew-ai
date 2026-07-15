@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import ClassVar
 from uuid import uuid4
+
+from langchain_core.callbacks import BaseCallbackHandler
 
 from clew.integrations.langchain import ClewCallbackHandler
 from clew.sdk.tracer import Tracer
@@ -13,6 +16,40 @@ from clew.sdk.tracer import Tracer
 def _make_handler(tmp_path: Path) -> tuple[ClewCallbackHandler, Tracer]:
     t = Tracer(cwd=tmp_path)
     return ClewCallbackHandler(tracer=t), t
+
+
+def test_handler_is_a_real_langchain_callback() -> None:
+    assert issubclass(ClewCallbackHandler, BaseCallbackHandler)
+
+
+def test_concurrent_parented_runs_remain_isolated(tmp_path: Path) -> None:
+    """Concurrent callback events retain their own parent topology."""
+    cb, tracer = _make_handler(tmp_path)
+
+    def run(index: int) -> None:
+        parent = uuid4()
+        child = uuid4()
+        cb.on_chain_start({"name": f"parent-{index}"}, {}, run_id=parent)
+        cb.on_tool_start(
+            {"name": f"tool-{index}"},
+            "input",
+            run_id=child,
+            parent_run_id=parent,
+        )
+        cb.on_tool_end("output", run_id=child)
+        cb.on_chain_end({}, run_id=parent)
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        list(executor.map(run, range(16)))
+
+    spans = list(tracer.store.store.iter_spans())
+    by_name = {span.name: span for span in spans}
+    assert len(spans) == 32
+    for index in range(16):
+        parent = by_name[f"parent-{index}"]
+        child = by_name[f"tool-{index}"]
+        assert child.parent_ids == [parent.id]
+        assert child.trace_id == parent.trace_id
 
 
 def test_chain_start_end(tmp_path: Path) -> None:
@@ -41,10 +78,13 @@ def test_llm_classified_as_llm(tmp_path: Path) -> None:
         ["hello"],
         run_id=run_id,
     )
+
     class _Gen:
         text = "hi back"
+
     class _Result:
         generations: ClassVar = [[_Gen()]]
+
     cb.on_llm_end(_Result(), run_id=run_id)
     spans = list(t._store.store.iter_spans())
     assert len(spans) == 1

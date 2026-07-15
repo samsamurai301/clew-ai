@@ -1,6 +1,6 @@
 """Git-style branch manager for clew reasoning traces.
 
-A *branch* is a named pointer into the Merkle DAG of spans. Like git
+A *branch* is a named pointer into the trace DAG. Like git
 refs, branches are stored as plain files on disk and updated atomically.
 The ``HEAD`` file holds the name of the currently checked-out branch.
 
@@ -14,10 +14,12 @@ See :file:`ARCHITECTURE.md` § "Branching" for the rationale and
 
 from __future__ import annotations
 
+import os
+import stat
 from datetime import UTC, datetime
 from pathlib import Path
 
-from clew.core.models import Branch
+from clew.core.models import UUID_HEX_LEN, Branch
 from clew.core.trace import TraceStore
 
 REFS_DIRNAME: str = "refs"
@@ -49,20 +51,17 @@ class BranchManager:
         """
         self._store = store
         self._refs_dir = store.store.root / REFS_DIRNAME
-        self._refs_dir.mkdir(parents=True, exist_ok=True)
         self._head_path = store.store.root / HEAD_FILENAME
-        # Note: iterdir() returns a generator; `not iterdir()` is always
-        # False. We must materialize with list() or any() to check
-        # whether the directory is empty.
-        if not any(self._refs_dir.iterdir()):
-            # No refs exist: create a default branch file pointing at
-            # an empty placeholder id. The user is expected to move
-            # the branch to a real span with ``move()`` before
-            # checking it out for meaningful work.
-            placeholder = "0" * 64
-            (self._refs_dir / DEFAULT_BRANCH).write_text(placeholder + "\n", encoding="utf-8")
-        if not self._head_path.exists():
-            self._head_path.write_text(DEFAULT_BRANCH + "\n", encoding="utf-8")
+        with store.store._thread_lock, store.store._process_lock:
+            self._refs_dir.mkdir(parents=True, exist_ok=True)
+            if not any(self._refs_dir.iterdir()):
+                placeholder = "0" * UUID_HEX_LEN
+                store.store._atomic_write(
+                    self._refs_dir / DEFAULT_BRANCH,
+                    f"{placeholder}\n".encode(),
+                )
+            if not self._head_path.exists():
+                store.store._atomic_write(self._head_path, f"{DEFAULT_BRANCH}\n".encode())
 
     # -- ref I/O ---------------------------------------------------------
 
@@ -77,7 +76,7 @@ class BranchManager:
             raise ValueError(f"invalid branch name: {name!r}")
         if "/" in name or "\\" in name or "\0" in name:
             raise ValueError(f"invalid branch name: {name!r}")
-        if any(ord(c) < 0x20 or ord(c) == 0x7f for c in name):
+        if any(ord(c) < 0x20 or ord(c) == 0x7F for c in name):
             raise ValueError(f"invalid branch name: {name!r}")
         if name.startswith("."):
             # Refuse hidden files — they'd never be on the allowlist
@@ -88,16 +87,65 @@ class BranchManager:
     def _read_ref(self, name: str) -> str:
         """Read a ref's head span id; raise :class:`KeyError` if missing."""
         path = self._ref_path(name)
-        if not path.exists():
-            raise KeyError(name)
-        return path.read_text(encoding="utf-8").strip()
+        try:
+            span_id = self._read_control_file(path, label=f"branch {name!r}").strip()
+        except FileNotFoundError:
+            raise KeyError(name) from None
+        if len(span_id) != UUID_HEX_LEN or any(char not in "0123456789abcdef" for char in span_id):
+            raise ValueError(
+                f"branch {name!r} contains malformed span id {span_id!r}; "
+                "run `clew doctor` and repair or remove the ref"
+            )
+        if span_id != "0" * UUID_HEX_LEN:
+            try:
+                self._store.store.get(span_id)
+            except KeyError as exc:
+                raise KeyError(f"branch {name!r} points to missing span {span_id!r}") from exc
+        return span_id
+
+    @staticmethod
+    def _read_control_file(path: Path, *, label: str, max_bytes: int = 512) -> str:
+        """Read a small regular control file without following links.
+
+        The lstat/open/fstat identity check closes the replacement window on
+        platforms with ``O_NOFOLLOW`` and still rejects links and non-regular
+        files on platforms that lack it. Multiple hard links are refused so a
+        store control file cannot be an alias for unrelated local content.
+        """
+        before = path.lstat()
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+            raise ValueError(f"{label} is not a regular single-link file")
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(path, flags)
+        try:
+            after = os.fstat(fd)
+            if not stat.S_ISREG(after.st_mode) or after.st_nlink != 1:
+                raise ValueError(f"{label} is not a regular single-link file")
+            if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
+                raise ValueError(f"{label} changed while it was being opened")
+            if after.st_size > max_bytes:
+                raise ValueError(f"{label} exceeds {max_bytes} bytes")
+            raw = os.read(fd, max_bytes + 1)
+        finally:
+            os.close(fd)
+        if len(raw) > max_bytes:
+            raise ValueError(f"{label} exceeds {max_bytes} bytes")
+        try:
+            return raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError(f"{label} is not valid UTF-8") from exc
 
     def _write_ref(self, name: str, span_id: str) -> None:
         """Atomically write a ref's head span id."""
+        if len(span_id) != UUID_HEX_LEN or any(char not in "0123456789abcdef" for char in span_id):
+            raise ValueError(f"invalid span id {span_id!r}; expected 32 lowercase hex characters")
+        if span_id != "0" * UUID_HEX_LEN:
+            try:
+                self._store.store.get(span_id)
+            except KeyError as exc:
+                raise KeyError(f"cannot point branch {name!r} at missing span {span_id!r}") from exc
         path = self._ref_path(name)
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(span_id + "\n", encoding="utf-8")
-        tmp.replace(path)
+        self._store.store._atomic_write(path, f"{span_id}\n".encode())
 
     # -- branch CRUD -----------------------------------------------------
 
@@ -108,10 +156,11 @@ class BranchManager:
         already exists. The new branch becomes the current ``HEAD``
         is NOT changed; use :meth:`checkout` to switch.
         """
-        path = self._ref_path(name)
-        if path.exists():
-            raise FileExistsError(f"branch {name!r} already exists")
-        self._write_ref(name, head_span_id)
+        with self._store.store._thread_lock, self._store.store._process_lock:
+            path = self._ref_path(name)
+            if path.exists():
+                raise FileExistsError(f"branch {name!r} already exists")
+            self._write_ref(name, head_span_id)
         return Branch(name=name, head_span_id=head_span_id, created_at=datetime.now(UTC))
 
     def get(self, name: str) -> Branch:
@@ -156,12 +205,13 @@ class BranchManager:
 
         Refuses to delete the currently checked-out branch.
         """
-        if name == self.current():
-            raise ValueError(f"cannot delete the currently checked-out branch {name!r}")
-        path = self._ref_path(name)
-        if not path.exists():
-            raise KeyError(name)
-        path.unlink()
+        with self._store.store._thread_lock, self._store.store._process_lock:
+            if name == self.current():
+                raise ValueError(f"cannot delete the currently checked-out branch {name!r}")
+            path = self._ref_path(name)
+            if not path.exists():
+                raise KeyError(name)
+            path.unlink()
 
     def current(self) -> str:
         """Return the name of the currently checked-out branch.
@@ -171,34 +221,34 @@ class BranchManager:
         ``HEAD`` to garbage; the doctor reports this as ``empty-head``
         or ``dangling-head``.
         """
-        if not self._head_path.exists():
-            raise ValueError("HEAD is missing")
-        raw = self._head_path.read_text(encoding="utf-8").strip()
+        try:
+            raw = self._read_control_file(self._head_path, label="HEAD").strip()
+        except FileNotFoundError:
+            raise ValueError("HEAD is missing") from None
         # Validate the name with the same rules as ``_ref_path`` so a
         # poisoned HEAD can't trick callers into reading a non-ref.
         if not raw:
             raise ValueError("HEAD is empty")
         if "/" in raw or "\\" in raw or "\0" in raw:
             raise ValueError(f"HEAD contains invalid branch name: {raw!r}")
-        if any(ord(c) < 0x20 or ord(c) == 0x7f for c in raw):
+        if any(ord(c) < 0x20 or ord(c) == 0x7F for c in raw):
             raise ValueError(f"HEAD contains invalid branch name: {raw!r}")
         return raw
 
     def checkout(self, name: str) -> None:
         """Switch ``HEAD`` to ``name``. Raises :class:`KeyError` if missing."""
-        path = self._ref_path(name)
-        if not path.exists():
-            raise KeyError(name)
-        self._head_path.write_text(name + "\n", encoding="utf-8")
+        with self._store.store._thread_lock, self._store.store._process_lock:
+            self._read_ref(name)
+            self._store.store._atomic_write(self._head_path, f"{name}\n".encode())
 
     def move(self, name: str, new_head_span_id: str) -> Branch:
         """Move an existing branch to ``new_head_span_id``.
 
         Raises :class:`KeyError` if the branch does not exist.
         """
-        if not self._ref_path(name).exists():
-            raise KeyError(name)
-        self._write_ref(name, new_head_span_id)
+        with self._store.store._thread_lock, self._store.store._process_lock:
+            self._read_ref(name)
+            self._write_ref(name, new_head_span_id)
         return Branch(name=name, head_span_id=new_head_span_id, created_at=datetime.now(UTC))
 
     # -- convenience -----------------------------------------------------

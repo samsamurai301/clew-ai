@@ -17,7 +17,7 @@ uv run python examples/simple_agent.py
 Runs a 3-step "agent" with a parameter (`model="gpt-4o"`), branches
 at a mid-trace span, replays the branch with a different parameter
 (`model="gpt-4o-mini"`), and prints a structural diff of the two
-traces. This is the killer-feature demo.
+traces. It runs entirely offline.
 
 ```bash
 uv run python examples/branching_demo.py

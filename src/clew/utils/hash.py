@@ -1,9 +1,10 @@
-"""Canonical JSON serialization and SHA-256 content addressing.
+"""Canonical JSON serialization and SHA-256 record integrity.
 
 This module is the single source of truth for how clew serializes values
 to bytes for hashing and storage. Two implementations, two machines, two
 Python versions must produce byte-for-byte identical output for the same
-input — that property is what makes the content-addressed store work.
+input. That property makes record verification portable across supported
+Python versions and operating systems.
 
 See :file:`PROTOCOL.md` §3 for the byte-level rules.
 """
@@ -38,10 +39,16 @@ def _normalize(value: Any) -> Any:
       not permit these and we refuse to silently produce undefined output.
     """
     if isinstance(value, Mapping):
-        # Materialize keys as strings, then sort by their UTF-8 bytes.
+        # JSON object keys are strings. Coercing (for example) ``1`` and
+        # ``"1"`` would collapse distinct Python mappings and silently lose
+        # data, so reject non-string keys before hashing or persistence.
         items: list[tuple[str, Any]] = []
         for k, v in value.items():
-            items.append((str(k), _normalize(v)))
+            if not isinstance(k, str):
+                raise TypeError(
+                    f"Cannot canonicalize mapping key {k!r}: JSON object keys must be strings."
+                )
+            items.append((k, _normalize(v)))
         items.sort(key=lambda kv: kv[0].encode("utf-8"))
         return dict(items)
     if isinstance(value, (list, tuple)):
@@ -59,8 +66,7 @@ def _normalize(value: Any) -> Any:
     if isinstance(value, float):
         if math.isnan(value) or math.isinf(value):
             raise ValueError(
-                f"Cannot canonicalize non-finite float: {value!r}; "
-                "JSON disallows NaN and Infinity."
+                f"Cannot canonicalize non-finite float: {value!r}; JSON disallows NaN and Infinity."
             )
         return value
     if value is None or isinstance(value, (str, int, bool)):
@@ -120,40 +126,14 @@ def content_hash(obj: Any) -> str:
     return hashlib.sha256(canonical_json(obj)).hexdigest()
 
 
-def _enum_value(value: Any) -> str:
-    """Return the string value of a Pydantic enum or a plain string."""
-    if hasattr(value, "value"):
-        return str(value.value)
-    return str(value)
-
-
 def span_hash(span: Span) -> str:
-    """Return the content hash of a :class:`Span` excluding its ``trace_id``.
+    """Return the exact-record integrity hash for a finalized span.
 
-    The set of fields hashed is exactly the span's *content* — every field
-    except ``trace_id``, which is the trace's identity rather than the
-    span's. Two spans with identical content but different ``trace_id``
-    (e.g. the same LLM call replayed under a different trace) will share
-    the same ``span_hash`` but get different content-addressed ``id``s.
-
-    Hashing the explicit field set (rather than ``span.model_dump()``)
-    makes the inclusion list auditable: any field added to the model is
-    NOT silently included here. Reviewer can read this function and
-    know exactly what goes into the hash.
+    Every persisted field participates except ``content_hash`` itself. The
+    occurrence and trace identities are intentionally included: this digest
+    verifies bytes and is never used for deduplication or identity.
     """
-    payload: dict[str, Any] = {
-        "id": span.id,
-        "parent_ids": list(span.parent_ids),
-        "type": _enum_value(span.type),
-        "name": span.name,
-        "attributes": span.attributes,
-        "input": span.input,
-        "output": span.output,
-        "started_at": span.started_at,
-        "ended_at": span.ended_at,
-        "status": _enum_value(span.status),
-    }
-    return content_hash(payload)
+    return content_hash(span.model_dump(mode="python", exclude={"content_hash"}))
 
 
 __all__ = ["canonical_json", "content_hash", "span_hash"]

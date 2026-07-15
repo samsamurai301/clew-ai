@@ -1,160 +1,108 @@
-"""Replay engine: re-execute a recorded trace, optionally from any span.
-
-A *replay* walks a recorded trace and re-runs each span through a
-user-supplied :class:`ReplayExecutor`. Crucially, replay **never
-mutates the original trace** — it always produces a new trace (with
-a fresh ``trace_id``) that the caller can compare against the
-original.
-
-Two built-in executors ship with clew:
-
-* :class:`MockExecutor` — re-uses the recorded output, byte-for-byte.
-  This is the default; it gives you a deterministic, side-effect-free
-  way to verify that a trace can be replayed at all.
-* :class:`RecordingExecutor` — calls a user-supplied async function
-  to compute fresh outputs and records them into the new trace.
-
-If ``from_span_id`` is given, only that span and its descendants are
-re-executed; ancestors are copied verbatim from the original.
-"""
+"""Topology-safe replay into a new, independently identified trace."""
 
 from __future__ import annotations
 
+import asyncio
+import inspect
+import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Protocol, runtime_checkable
-from uuid import uuid4
 
 from clew.core.models import Span, SpanStatus, Trace
 from clew.core.trace import TraceStore
 
-# A 64-char hex string placeholder for "no parent" in a fresh trace.
-_NULL_PARENT: str = "0" * 64
+
+@dataclass(frozen=True, slots=True)
+class ReplayResult:
+    """The constrained payload an executor may return to the replay engine."""
+
+    output: Any = None
+    attributes: dict[str, Any] = field(default_factory=dict)
+    status: SpanStatus = SpanStatus.OK
+    error: str | None = None
+    metadata: dict[str, Any] | None = None
+
+    def __post_init__(self) -> None:
+        if self.status is SpanStatus.SKIPPED:
+            raise ValueError("Executors cannot return SKIPPED; only the engine can skip.")
+        if self.status is SpanStatus.ERROR and not self.error:
+            raise ValueError("An ERROR ReplayResult must include an error message.")
+        if self.status is not SpanStatus.ERROR and self.error:
+            raise ValueError("Only an ERROR ReplayResult may include an error message.")
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class ReplayContext:
-    """Inputs to a replay run, passed to :class:`ReplayExecutor.execute`."""
+    """Finalized parent context supplied to a replay executor."""
 
     model: str = ""
-    """LLM model name (or empty for non-LLM spans)."""
-
     params: dict[str, Any] = field(default_factory=dict)
-    """Free-form execution parameters (temperature, tools, etc.)."""
-
     env: dict[str, Any] = field(default_factory=dict)
-    """Environment / secrets (mocked; real values must never be replayed)."""
-
-    parent_chain: list[Span] = field(default_factory=list)
-    """Ancestor spans (root first) — the executor can use these for context."""
+    parent_chain: tuple[Span, ...] = ()
 
 
 @runtime_checkable
 class ReplayExecutor(Protocol):
-    """Protocol a replay executor must satisfy."""
+    """A sync or async callable object that returns only replay payload data."""
 
-    async def execute(self, span: Span, ctx: ReplayContext) -> Span:
-        """Re-execute ``span`` under ``ctx`` and return the resulting span.
-
-        Implementations MUST return a new :class:`Span` (never mutate
-        the input). The returned span should be ``content_hash``-stable
-        for identical inputs to be considered deterministic.
-        """
-        ...
+    def execute(
+        self, span: Span, context: ReplayContext
+    ) -> ReplayResult | Awaitable[ReplayResult]: ...
 
 
 class MockExecutor:
-    """Replay executor that re-uses the recorded output verbatim.
+    """Offline executor that reuses the captured output and attributes."""
 
-    Useful for testing the replay pipeline itself without depending
-    on any external model or tool. The replayed trace is bit-identical
-    to the original (same span ids, same content hashes).
-    """
-
-    async def execute(self, span: Span, ctx: ReplayContext) -> Span:
-        """Return a fresh copy of ``span`` with the original output.
-
-        The returned span has the same id, same parent ids, same
-        input/output/attributes — the only thing that changes is
-        the ``started_at``/``ended_at`` timestamps (set to now).
-        """
-        return self.execute_sync(span, ctx)
-
-    def execute_sync(self, span: Span, ctx: ReplayContext) -> Span:
-        """Synchronous variant of :meth:`execute`.
-
-        Used by :class:`ReplayEngine._replay_sync`, which runs from
-        contexts (CLI commands, MCP tool handlers) that cannot
-        drive a coroutine because an event loop is already
-        running.
-        """
-        now = datetime.now(UTC)
-        return span.model_copy(update={"started_at": now, "ended_at": now, "status": SpanStatus.OK})
+    def execute(self, span: Span, context: ReplayContext) -> ReplayResult:
+        del context
+        return ReplayResult(output=span.output)
 
 
 class RecordingExecutor:
-    """Replay executor that calls a user function to compute outputs.
+    """Adapt a ``(Span, ReplayContext)`` callable to ReplayExecutor."""
 
-    The callable receives ``(span, ctx)`` and returns a tuple of
-    ``(output, attributes_delta)``. The new span inherits the
-    original's input, name, and parent ids; output, status, and
-    ended_at are set from the callable's return value.
-    """
-
-    def __init__(self, fn: Any) -> None:
-        """Wrap a callable ``async def fn(span, ctx) -> (output, attributes_delta)``."""
+    def __init__(
+        self,
+        fn: Callable[[Span, ReplayContext], ReplayResult | Awaitable[ReplayResult]],
+    ) -> None:
         self._fn = fn
 
-    async def execute(self, span: Span, ctx: ReplayContext) -> Span:
-        """Call the wrapped function and return the resulting span."""
-        output, attrs_delta = await self._fn(span, ctx)
-        now = datetime.now(UTC)
-        new_attrs = dict(span.attributes)
-        new_attrs.update(attrs_delta or {})
-        return span.model_copy(
-            update={
-                "output": output,
-                "attributes": new_attrs,
-                "ended_at": now,
-                "status": SpanStatus.OK,
-            }
-        )
+    def execute(self, span: Span, context: ReplayContext) -> ReplayResult | Awaitable[ReplayResult]:
+        return self._fn(span, context)
 
 
 class ReplayEngine:
-    """Walk a recorded trace and produce a fresh trace via an executor."""
+    """Replay a full trace or a selected subtree without cross-trace parents."""
 
     def __init__(self, store: TraceStore, executor: ReplayExecutor | None = None) -> None:
-        """Attach to a store and pick a default executor.
-
-        The default executor is :class:`MockExecutor` if none is given.
-        """
         self._store = store
-        self._executor: ReplayExecutor = executor if executor is not None else MockExecutor()
+        self._executor = executor or MockExecutor()
 
     @property
     def executor(self) -> ReplayExecutor:
-        """Return the configured executor."""
         return self._executor
 
     def dry_run(self, trace_id: str, from_span_id: str | None = None) -> list[Span]:
-        """Return the spans that ``replay()`` would re-execute.
-
-        Does not write anything. The returned list is in topological
-        order (parents before children).
-        """
-        original = self._store.get_trace(trace_id)
+        """Return only spans that would be executed, not cloned ancestors."""
+        trace = self._store.get_trace(trace_id)
         if from_span_id is None:
-            return list(original.spans)
-        descendants = {from_span_id}
-        frontier = [from_span_id]
-        while frontier:
-            current = frontier.pop()
-            for s in original.spans:
-                if current in s.parent_ids and s.id not in descendants:
-                    descendants.add(s.id)
-                    frontier.append(s.id)
-        return [s for s in original.spans if s.id in descendants]
+            return list(trace.spans)
+        by_id = {span.id: span for span in trace.spans}
+        if from_span_id not in by_id:
+            raise KeyError(f"span {from_span_id!r} not in trace {trace_id!r}")
+        selected = {from_span_id}
+        changed = True
+        while changed:
+            changed = False
+            for span in trace.spans:
+                if span.id not in selected and any(
+                    parent in selected for parent in span.parent_ids
+                ):
+                    selected.add(span.id)
+                    changed = True
+        return [span for span in trace.spans if span.id in selected]
 
     async def replay(
         self,
@@ -162,145 +110,220 @@ class ReplayEngine:
         from_span_id: str | None = None,
         executor: ReplayExecutor | None = None,
     ) -> Trace:
-        """Re-execute a trace, producing a new trace with a fresh id.
+        """Persist and return a complete diagnostic replay trace.
 
-        The original trace is never mutated. The new trace shares
-        the original's content (input, attributes) but has new
-        ``trace_id`` and re-executed ``output``/``status``/timing.
-
-        If ``from_span_id`` is None, replay from the root. Otherwise,
-        replay that span and its descendants; ancestors are copied.
+        Executor exceptions become ERROR spans. Every descendant that depends
+        on a failed occurrence becomes SKIPPED, so the returned trace remains
+        inspectable and structurally valid.
         """
-        ex = executor if executor is not None else self._executor
+        selected_executor = executor or self._executor
         original = self._store.get_trace(trace_id)
-        new_trace_id = uuid4().hex
-        new_spans: list[Span] = []
-        # Map original span id -> new span id so we can rewrite parents.
-        id_map: dict[str, str] = {}
-        # We always pick a brand-new root for the replayed trace.
-        spans_to_run: list[Span]
-        ancestors_to_copy: list[Span]
-        if from_span_id is None:
-            spans_to_run = list(original.spans)
-            ancestors_to_copy = []
-        else:
-            # Verify the span exists in the trace.
-            if not any(s.id == from_span_id for s in original.spans):
-                raise KeyError(f"span {from_span_id!r} not in trace {trace_id!r}")
-            run_set_ids = {s.id for s in self.dry_run(trace_id, from_span_id)}
-            spans_to_run = [s for s in original.spans if s.id in run_set_ids]
-            ancestors_to_copy = [s for s in original.spans if s.id not in run_set_ids]
-        # First pass: create new spans (with placeholder content for the
-        # ones we'll re-execute), writing them to the store. The store
-        # returns their (possibly deduplicated) ids.
-        for span in spans_to_run:
-            new_id = uuid4().hex
-            id_map[span.id] = new_id
-        # Now rewrite parents and re-execute.
-        for span in spans_to_run:
-            new_parents = [id_map.get(p, p) for p in span.parent_ids]
-            ctx = ReplayContext(
-                parent_chain=[s for s in spans_to_run if s.id in new_parents],
-            )
-            new_span = await ex.execute(span, ctx)
-            # Re-stamp with the new id, new trace, and rewritten parents.
-            # Use the executor's ended_at if it set one; otherwise use
-            # its started_at so we never violate the started_at <= ended_at
-            # invariant enforced by the Span model.
-            ended = new_span.ended_at or new_span.started_at
-            rewritten = new_span.model_copy(
-                update={
-                    "id": id_map[span.id],
-                    "trace_id": new_trace_id,
-                    "parent_ids": new_parents,
-                    "started_at": ended,
-                    "ended_at": ended,
-                }
-            )
-            # If the executor left the id as the original, the store will
-            # dedupe; we need to ensure the new id is used. So we set it
-            # here, and the store will accept it (idempotent on content).
-            self._store.add_span(rewritten)
-            new_spans.append(rewritten)
-        # Copy ancestors verbatim. They get new ids (so the new trace
-        # has a unique span identity) but identical content.
-        for span in ancestors_to_copy:
-            new_id = uuid4().hex
-            id_map[span.id] = new_id
-            new_parents = [id_map.get(p, p) for p in span.parent_ids]
-            rewritten = span.model_copy(
-                update={
-                    "id": new_id,
-                    "trace_id": new_trace_id,
-                    "parent_ids": new_parents,
-                }
-            )
-            self._store.add_span(rewritten)
-            new_spans.append(rewritten)
-        # Re-fetch the trace from the store so the Trace object is
-        # exactly what the store holds (with the store's chosen ids).
+        by_id = {span.id: span for span in original.spans}
+        run_ids = {span.id for span in self.dry_run(trace_id, from_span_id)}
+        included_ids = set(run_ids)
+        # A selected descendant can be a multi-parent join. Clone the complete
+        # ancestor closure for every selected node, not just the target's first
+        # lineage, so all rewritten parent ids belong to the new trace.
+        frontier = list(included_ids)
+        while frontier:
+            current = by_id[frontier.pop()]
+            for parent_id in current.parent_ids:
+                if parent_id not in included_ids:
+                    included_ids.add(parent_id)
+                    frontier.append(parent_id)
+
+        included = [span for span in original.spans if span.id in included_ids]
+        new_trace_id = uuid.uuid4().hex
+        # Allocate every identity before execution. Parent rewriting therefore
+        # cannot accidentally retain an old-trace id, even for partial replay.
+        id_map = {span.id: uuid.uuid4().hex for span in included}
+        new_by_old_id: dict[str, Span] = {}
+        failed_or_skipped: set[str] = set()
+
+        for sequence, source in enumerate(included):
+            new_parents = [id_map[parent] for parent in source.parent_ids]
+            if source.id not in run_ids:
+                finalized = self._clone(
+                    source,
+                    id=id_map[source.id],
+                    trace_id=new_trace_id,
+                    parent_ids=new_parents,
+                    sequence=sequence,
+                )
+            elif any(parent in failed_or_skipped for parent in source.parent_ids):
+                failed_parents = [
+                    parent for parent in source.parent_ids if parent in failed_or_skipped
+                ]
+                finalized = self._from_result(
+                    source,
+                    ReplayResult(
+                        output=None,
+                        attributes={
+                            "replay.skip_reason": "dependency failed",
+                            "replay.failed_parent_ids": failed_parents,
+                        },
+                    ),
+                    id=id_map[source.id],
+                    trace_id=new_trace_id,
+                    parent_ids=new_parents,
+                    sequence=sequence,
+                    started_at=datetime.now(UTC),
+                    ended_at=datetime.now(UTC),
+                    forced_status=SpanStatus.SKIPPED,
+                )
+                failed_or_skipped.add(source.id)
+            else:
+                parent_chain = self._parent_chain(source, by_id, new_by_old_id)
+                context = ReplayContext(parent_chain=tuple(parent_chain))
+                started_at = datetime.now(UTC)
+                try:
+                    result = selected_executor.execute(source, context)
+                    if inspect.isawaitable(result):
+                        result = await result
+                    if not isinstance(result, ReplayResult):
+                        raise TypeError(
+                            "Replay executors must return ReplayResult, got "
+                            f"{type(result).__name__}."
+                        )
+                    ended_at = datetime.now(UTC)
+                    finalized = self._from_result(
+                        source,
+                        result,
+                        id=id_map[source.id],
+                        trace_id=new_trace_id,
+                        parent_ids=new_parents,
+                        sequence=sequence,
+                        started_at=started_at,
+                        ended_at=ended_at,
+                    )
+                    if result.status is SpanStatus.ERROR:
+                        failed_or_skipped.add(source.id)
+                except Exception as exc:
+                    ended_at = datetime.now(UTC)
+                    finalized = self._from_result(
+                        source,
+                        ReplayResult(
+                            output=None,
+                            attributes={
+                                "error.type": type(exc).__name__,
+                                "error.message": str(exc),
+                            },
+                            status=SpanStatus.ERROR,
+                            error=f"{type(exc).__name__}: {exc}",
+                        ),
+                        id=id_map[source.id],
+                        trace_id=new_trace_id,
+                        parent_ids=new_parents,
+                        sequence=sequence,
+                        started_at=started_at,
+                        ended_at=ended_at,
+                    )
+                    failed_or_skipped.add(source.id)
+            self._store.add_span(finalized)
+            new_by_old_id[source.id] = finalized
+
         return self._store.get_trace(new_trace_id)
 
     def _replay_sync(
         self,
         trace_id: str,
         executor: ReplayExecutor | None = None,
+        from_span_id: str | None = None,
     ) -> Trace:
-        """Synchronous version of :meth:`replay`.
+        """Drive :meth:`replay` when no event loop is currently running."""
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(self.replay(trace_id, from_span_id, executor))
+        raise RuntimeError(
+            "ReplayEngine._replay_sync cannot run inside an active event loop; "
+            "await ReplayEngine.replay(...) instead."
+        )
 
-        For executors whose ``execute`` is a regular method (not a
-        coroutine), this avoids the overhead of spinning up an event
-        loop. Useful for CLI commands and MCP tool handlers that are
-        already inside a running loop.
-        """
-        ex = executor if executor is not None else self._executor
-        original = self._store.get_trace(trace_id)
-        new_trace_id = uuid4().hex
-        id_map: dict[str, str] = {}
-        for span in original.spans:
-            id_map[span.id] = uuid4().hex
-        for span in original.spans:
-            new_parents = [id_map.get(p, p) for p in span.parent_ids]
-            ctx = ReplayContext(
-                parent_chain=[s for s in original.spans if s.id in new_parents],
-            )
-            # Drive the executor synchronously. Most executors
-            # (including :class:`MockExecutor`) expose a sync
-            # ``execute_sync`` method. If the executor doesn't, we
-            # attempt the async path via ``asyncio.run`` — this only
-            # works if no event loop is already running.
-            sync_attr = getattr(ex, "execute_sync", None)
-            if sync_attr is not None:
-                result = sync_attr(span, ctx)
-            else:
-                import asyncio
-                import inspect
-                maybe_coro = ex.execute(span, ctx)
-                if inspect.iscoroutine(maybe_coro):
-                    try:
-                        loop = asyncio.get_event_loop()
-                        if loop.is_running():
-                            raise TypeError(
-                                "ReplayEngine._replay_sync cannot drive "
-                                "an async executor from within a running "
-                                "event loop; use ReplayEngine.replay "
-                                "from an async context instead."
-                            )
-                    except RuntimeError:
-                        pass
-                    result = asyncio.run(maybe_coro)
-                else:
-                    result = maybe_coro
-            ended = result.ended_at or result.started_at
-            rewritten = result.model_copy(
-                update={
-                    "id": id_map[span.id],
-                    "trace_id": new_trace_id,
-                    "parent_ids": new_parents,
-                    "started_at": ended,
-                    "ended_at": ended,
-                }
-            )
-            self._store.add_span(rewritten)
-        return self._store.get_trace(new_trace_id)
+    @staticmethod
+    def _parent_chain(
+        source: Span,
+        source_by_id: dict[str, Span],
+        finalized_by_old_id: dict[str, Span],
+    ) -> list[Span]:
+        ancestor_ids: set[str] = set()
+        frontier = list(source.parent_ids)
+        while frontier:
+            parent_id = frontier.pop()
+            if parent_id in ancestor_ids:
+                continue
+            ancestor_ids.add(parent_id)
+            frontier.extend(source_by_id[parent_id].parent_ids)
+        return sorted(
+            (finalized_by_old_id[parent_id] for parent_id in ancestor_ids),
+            key=lambda span: (span.sequence, span.id),
+        )
 
+    @staticmethod
+    def _clone(
+        source: Span,
+        *,
+        id: str,
+        trace_id: str,
+        parent_ids: list[str],
+        sequence: int,
+    ) -> Span:
+        return Span(
+            id=id,
+            trace_id=trace_id,
+            parent_ids=parent_ids,
+            sequence=sequence,
+            type=source.type,
+            name=source.name,
+            attributes=dict(source.attributes),
+            input=source.input,
+            output=source.output,
+            started_at=source.started_at,
+            ended_at=source.ended_at,
+            status=source.status,
+            error=source.error,
+            metadata=dict(source.metadata) if source.metadata is not None else None,
+        )
+
+    @staticmethod
+    def _from_result(
+        source: Span,
+        result: ReplayResult,
+        *,
+        id: str,
+        trace_id: str,
+        parent_ids: list[str],
+        sequence: int,
+        started_at: datetime,
+        ended_at: datetime,
+        forced_status: SpanStatus | None = None,
+    ) -> Span:
+        attributes = dict(source.attributes)
+        attributes.update(result.attributes)
+        status = forced_status or result.status
+        return Span(
+            id=id,
+            trace_id=trace_id,
+            parent_ids=parent_ids,
+            sequence=sequence,
+            type=source.type,
+            name=source.name,
+            attributes=attributes,
+            input=source.input,
+            output=result.output,
+            started_at=started_at,
+            ended_at=ended_at,
+            status=status,
+            error=result.error if status is SpanStatus.ERROR else None,
+            metadata=result.metadata,
+        )
+
+
+__all__ = [
+    "MockExecutor",
+    "RecordingExecutor",
+    "ReplayContext",
+    "ReplayEngine",
+    "ReplayExecutor",
+    "ReplayResult",
+]

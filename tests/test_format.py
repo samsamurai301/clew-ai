@@ -16,9 +16,10 @@ from clew.core.models import Span, SpanStatus, SpanType
 
 def _make_span(**overrides: object) -> Span:
     defaults: dict[str, object] = {
-        "id": "1" * 64,
-        "trace_id": "2" * 64,
-        "parent_ids": ["3" * 64],
+        "id": "1" * 32,
+        "trace_id": "2" * 32,
+        "parent_ids": [],
+        "sequence": 0,
         "type": SpanType.LLM,
         "name": "chat",
         "attributes": {"gen_ai.system": "openai", "gen_ai.request.model": "gpt-4o"},
@@ -42,7 +43,13 @@ def test_to_otel_roundtrip() -> None:
     span = _make_span()
     otel = to_otel(span)
     reconstructed = from_otel(otel)
-    assert reconstructed == span
+    assert reconstructed.id != span.id
+    assert reconstructed.trace_id != span.trace_id
+    assert reconstructed.name == span.name
+    assert reconstructed.input == span.input
+    assert reconstructed.output == span.output
+    assert reconstructed.metadata is not None
+    assert reconstructed.metadata["otel.source_span_id"] == span.id
 
 
 def test_to_otel_roundtrip_error_status() -> None:
@@ -128,9 +135,12 @@ def test_openai_completion_span_roundtrip() -> None:
     assert span.attributes["gen_ai.usage.input_tokens"] == 612
     assert span.attributes["gen_ai.usage.output_tokens"] == 87
     assert span.attributes["gen_ai.response.finish_reason"] == "stop"
-    assert span.parent_ids == ["c" * 64]
-    assert span.trace_id == "a" * 64
-    assert span.id == "b" * 64
+    assert span.parent_ids == []
+    assert len(span.trace_id) == len(span.id) == 32
+    assert span.metadata is not None
+    assert span.metadata["otel.source_trace_id"] == "a" * 64
+    assert span.metadata["otel.source_span_id"] == "b" * 64
+    assert span.metadata["otel.source_parent_ids"] == ["c" * 64]
 
     # Round-trip back to OTel and check stability.
     otel2 = to_otel(span)
@@ -144,7 +154,9 @@ def test_openai_completion_span_roundtrip() -> None:
     assert otel2["end_time"] == otel["end_time"]
     # And the double roundtrip is stable.
     span2 = from_otel(otel2)
-    assert span2 == span
+    assert span2.name == span.name
+    assert span2.input == span.input
+    assert span2.output == span.output
 
 
 # ---------------------------------------------------------------------------
@@ -199,7 +211,9 @@ def test_tool_call_span_roundtrip() -> None:
     assert otel2["input"] == otel["input"]
     assert otel2["output"] == otel["output"]
     span2 = from_otel(otel2)
-    assert span2 == span
+    assert span2.name == span.name
+    assert span2.input == span.input
+    assert span2.output == span.output
 
 
 # ---------------------------------------------------------------------------

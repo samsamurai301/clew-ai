@@ -32,9 +32,26 @@ t = Tracer(cwd=Path.cwd())
 def _mock_stream(prompt: str) -> Iterator[str]:
     """Yield tokens one at a time. Real LLM streaming looks like this."""
     tokens = [
-        "clew ", "is ", "git ", "for ", "AI ", "reasoning. ",
-        "It ", "records ", "every ", "step ", "of ", "an ", "agent ",
-        "run, ", "branches ", "the ", "trace, ", "and ", "diffs ", "runs.",
+        "clew ",
+        "is ",
+        "a ",
+        "zero-server ",
+        "debugger ",
+        "for ",
+        "It ",
+        "records ",
+        "every ",
+        "step ",
+        "of ",
+        "an ",
+        "agent ",
+        "run, ",
+        "replays ",
+        "traces, ",
+        "branches, ",
+        "and ",
+        "diffs ",
+        "runs.",
     ]
     for token in tokens:
         time.sleep(0.005)  # simulate network latency

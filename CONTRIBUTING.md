@@ -6,8 +6,8 @@ covers the day-to-day workflow.
 ## TL;DR
 
 ```bash
-git clone https://github.com/clew/clew
-cd clew
+git clone https://github.com/samsamurai301/clew-ai
+cd clew-ai
 uv sync --group dev
 uv run pytest          # run the test suite
 uv run ruff check .    # lint
@@ -36,10 +36,11 @@ discussion in an issue first.
 ## Style
 
 - **Python 3.11+** features are fair game (PEP 604, StrEnum, etc.).
-- We use **Pydantic v2** for all structured data; never dataclasses.
+- We use **Pydantic v2** for persisted domain models and frozen dataclasses for small
+  in-memory result/context values.
 - We use **uv** for dependency management; don't commit `poetry.lock`
   or `requirements.txt`.
-- We use **typer** + **rich** + **textual** for user-facing surfaces.
+- We use **Typer** and **Rich** for the CLI. Textual is an optional TUI extra.
 - All public functions and methods get a docstring in the same
   style as the rest of the codebase (imperative mood, mention
   side effects, end with a period).
@@ -56,7 +57,7 @@ discussion in an issue first.
 2. Add the command to the appropriate section comment (e.g.
    `# --- share / verify / import ---`).
 3. Add a test in `tests/test_cli.py` using `typer.testing.CliRunner`.
-4. Update `docs/CLI.md` with the new command.
+4. Update `docs/user-guide/cli.md` with the new command.
 
 ## Adding a CLI sub-feature
 
@@ -74,9 +75,10 @@ If you're adding a new store-level operation (like `clew doctor`):
 - The CLI tests use `typer.testing.CliRunner`. We *do not* mock
   the store; tests run against a real `.clew` directory in a tmp
   path.
-- Aim for 90%+ coverage on the code you add.
-- If you change a public API, update `docs/SDK.md` or
-  `docs/CLI.md` in the same commit.
+- Preserve the repository gate of at least 85% branch coverage; add focused coverage for
+  every behavior you introduce.
+- If you change a public API, update `docs/user-guide/tracer.md` or
+  `docs/user-guide/cli.md` in the same commit.
 
 ## Commit messages
 
@@ -94,13 +96,8 @@ CHANGE:` footer (or a `!` after the type) triggers a major bump.
 
 ## Release process
 
-Maintainers run the release. The sequence is:
-
-1. Update `CHANGELOG.md` with the new version's notes.
-2. Bump the version in `pyproject.toml`.
-3. Commit and tag: `git tag v1.x.y`.
-4. CI builds the sdist + wheel and publishes to PyPI via
-   trusted publishing.
+Maintainers run releases through the clean-commit, TestPyPI, artifact-verification, tag,
+trusted-publishing, Pages, and public-link checklist in [`docs/RELEASE.md`](docs/RELEASE.md).
 
 You do not need to do any of this for a PR — the maintainer will
 handle it.
@@ -109,7 +106,6 @@ handle it.
 
 This project follows the [Contributor Covenant](https://www.contributor-covenant.org/).
 Be kind. Assume good faith. Focus on the code, not the person.
-
 
 ## Security
 

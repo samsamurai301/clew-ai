@@ -112,9 +112,7 @@ def test_run_and_record_timeout(tmp_path: Path) -> None:
     store = Store(tmp_path / ".clew")
     # Sleep 5 seconds; timeout after 0.1.
     argv = [sys.executable, "-c", "import time; time.sleep(5)"]
-    span = run_and_record(
-        argv, cwd=tmp_path, store=store, timeout_s=0.1
-    )
+    span = run_and_record(argv, cwd=tmp_path, store=store, timeout_s=0.1)
     assert span.status == SpanStatus.ERROR
     assert span.error is not None
     assert "timeout" in span.error.lower()
@@ -145,14 +143,13 @@ def test_run_and_record_attributes_capture_argv(tmp_path: Path) -> None:
     assert "duration_s" in span.attributes
 
 
-def test_run_and_record_content_addressed_id(tmp_path: Path) -> None:
-    """Two runs with the same argv + cwd share a span id (modulo timestamps).
-
-    The span id is content-addressed; the hash excludes timestamps
-    and the id field, so identical inputs collapse.
-    """
+def test_run_and_record_allocates_unique_occurrence_ids(tmp_path: Path) -> None:
+    """Every command occurrence remains distinct even for identical inputs."""
     store = Store(tmp_path / ".clew")
     argv = _python_echo("same")
     a = run_and_record(argv, cwd=tmp_path, store=store, name="run")
     b = run_and_record(argv, cwd=tmp_path, store=store, name="run")
-    assert a.id == b.id
+    assert a.id != b.id
+    assert a.trace_id != b.trace_id
+    assert store.get(a.id).content_hash == a.content_hash
+    assert store.get(b.id).content_hash == b.content_hash

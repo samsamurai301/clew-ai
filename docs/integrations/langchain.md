@@ -8,11 +8,11 @@ or `__call__` and the trace appears in your local store.
 ## Install
 
 ```bash
-uv add 'clew[langchain]'  # or: uv add clew langchain
+uv add 'clew-ai[langchain]'  # or: uv add clew-ai langchain
 ```
 
-(The `langchain` extra pulls in `langchain-core` for the type
-hints. The handler itself is pure Python.)
+The handler subclasses LangChain's real `BaseCallbackHandler`; the extra installs
+`langchain-core` as a runtime integration dependency.
 
 ## Quick example
 
@@ -64,11 +64,10 @@ For each LangChain event, the handler writes a span with:
 | `span.type` | `LLM` for chat models, `TOOL` for tool runs, `OBSERVATION` for everything else |
 | `span.input` | the runnable's input (serialized) |
 | `span.output` | the runnable's output (serialized) |
-| `span.attributes` | the runnable's metadata (model name, temperature, etc.) |
+| `span.attributes` | LangChain run id and parent run id |
 | `span.status` | `OK` on success, `ERROR` on exception |
 
-Tool calls become `SpanType.TOOL` with the tool name in
-`attributes["tool_name"]`.
+Tool calls become `SpanType.TOOL` and preserve their serialized tool name.
 
 ## Sharing across chains
 
@@ -83,11 +82,11 @@ def big_agent(question: str) -> str:
     return chain3.invoke(b, config={"callbacks": [cb]})
 ```
 
-The handler maintains its own context (which runnable is
-currently active) so the spans form a single tree.
+The handler maps each LangChain `run_id` to an active internal span and honors
+`parent_run_id`. A lock protects that map, so concurrent runs keep their own topology even
+when callback events interleave.
 
 ## See also
 
-- [OpenTelemetry integration](otel.md) — bridges for OpenAI
-  and Anthropic directly
+- [OpenAI / Anthropic integration](llm-sdks.md) — provider wrappers
 - [SDK reference](../reference/sdk.md)

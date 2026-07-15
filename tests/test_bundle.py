@@ -80,6 +80,7 @@ def make_trace_with_spans(span_count: int = 3) -> tuple[Trace, list[Span]]:
             id=uuid4().hex,
             trace_id=trace_id,
             parent_ids=parent,
+            sequence=i,
             type=SpanType.OBSERVATION,
             name=f"step-{i}",
             attributes={"i": i},
@@ -158,6 +159,7 @@ def test_build_and_verify_round_trip(tmp_path: Path, keypair: tuple[bytes, bytes
     assert v.manifest["root_span_id"] == trace.root_span_id
     assert v.manifest["span_count"] == 3
     assert len(v.span_files) == 3
+    assert {span.id for span in v.verified_spans} == {span.id for span in spans}
 
 
 def test_verify_fails_on_wrong_key(tmp_path: Path) -> None:
@@ -214,9 +216,7 @@ def test_verify_fails_on_manifest_tamper(tmp_path: Path, keypair: tuple[bytes, b
     assert "signature" in (v.reason or "").lower()
 
 
-def test_verify_fails_on_span_content_tamper(
-    tmp_path: Path, keypair: tuple[bytes, bytes]
-) -> None:
+def test_verify_fails_on_span_content_tamper(tmp_path: Path, keypair: tuple[bytes, bytes]) -> None:
     """Modifying a span's content breaks the spans_sha256 cross-check."""
     priv, pub = keypair
     trace, spans = make_trace_with_spans(2)
@@ -249,7 +249,7 @@ def test_verify_fails_on_span_content_tamper(
                     dst.add(m)
     v = verify_bundle(tampered, load_public_key(_bytes_to_tmpfile(pub)))
     assert v.valid is False
-    assert "sha256" in (v.reason or "").lower()
+    assert "record verification" in (v.reason or "").lower()
 
 
 def test_verify_fails_on_missing_manifest(tmp_path: Path) -> None:
@@ -354,9 +354,7 @@ def test_extract_spans_round_trip(tmp_path: Path, keypair: tuple[bytes, bytes]) 
 # ---------------------------------------------------------------------------
 
 
-def test_manifest_includes_public_key(
-    tmp_path: Path, keypair: tuple[bytes, bytes]
-) -> None:
+def test_manifest_includes_public_key(tmp_path: Path, keypair: tuple[bytes, bytes]) -> None:
     """The manifest embeds the public key, so verifiers can match it.
 
     In practice, the public key is supplied out-of-band; this is a
@@ -380,11 +378,11 @@ def test_manifest_includes_public_key(
     assert embedded.encode("ascii") == pub
 
 
-def test_spans_sha256_cross_check_round_trip(
-    tmp_path: Path, keypair: tuple[bytes, bytes]
-) -> None:
+def test_spans_sha256_cross_check_round_trip(tmp_path: Path, keypair: tuple[bytes, bytes]) -> None:
     """The manifest's spans_sha256 matches the actual span bytes."""
     import hashlib
+
+    from clew.utils.hash import canonical_json
 
     priv, pub = keypair
     trace, spans = make_trace_with_spans(2)
@@ -398,8 +396,11 @@ def test_spans_sha256_cross_check_round_trip(
         public_key=load_public_key(_bytes_to_tmpfile(pub)),
     )
     h = hashlib.sha256()
-    for s in spans:
-        h.update(s.model_dump_json().encode("utf-8"))
+    for s in sorted(spans, key=lambda span: span.id):
+        h.update(s.id.encode("ascii"))
+        h.update(b"\0")
+        h.update(canonical_json(s.model_dump(mode="json")))
+        h.update(b"\0")
     assert result.manifest["spans_sha256"] == h.hexdigest()
 
 
@@ -488,12 +489,44 @@ def test_bundle_rejects_too_many_members(tmp_path: Path) -> None:
     bad = tmp_path / "b.tgz"
     with tarfile.open(bad, "w:gz") as tar:
         for i in range(10):
-            info = tarfile.TarInfo(name=f"f{i}")
+            info = tarfile.TarInfo(name=f"spans/{i:032x}.json")
             tar.addfile(info)
     _, pub = generate_keypair()
     v = verify_bundle(bad, load_public_key(_bytes_to_tmpfile(pub)), max_members=5)
     assert v.valid is False
     assert "members" in (v.reason or "").lower()
+
+
+def test_bundle_bounds_compressed_pax_metadata_before_tar_parsing(tmp_path: Path) -> None:
+    """PAX extension bodies count against the bounded decompressed stream."""
+    bad = tmp_path / "pax-metadata.tgz"
+    with tarfile.open(bad, "w:gz", format=tarfile.PAX_FORMAT) as tar:
+        info = tarfile.TarInfo(name="manifest.json")
+        info.pax_headers = {"comment": "x" * (2 * 1024 * 1024)}
+        body = b"{}"
+        info.size = len(body)
+        tar.addfile(info, io.BytesIO(body))
+    _, pub = generate_keypair()
+    public_key = load_public_key(_bytes_to_tmpfile(pub))
+    result = verify_bundle(bad, public_key, max_total_bytes=128, max_members=1)
+    assert result.valid is False
+    assert "decompressed stream exceeds" in (result.reason or "")
+    with pytest.raises(ValueError, match="decompressed stream exceeds"):
+        extract_spans(bad, max_total_bytes=128, max_members=1)
+
+
+def test_bundle_rejects_duplicate_member_names(tmp_path: Path) -> None:
+    """Ambiguous tar members are rejected before signature interpretation."""
+    bad = tmp_path / "duplicate.tgz"
+    with tarfile.open(bad, "w:gz") as tar:
+        for body in (b"first", b"second"):
+            info = tarfile.TarInfo(name="manifest.json")
+            info.size = len(body)
+            tar.addfile(info, io.BytesIO(body))
+    _, pub = generate_keypair()
+    result = verify_bundle(bad, load_public_key(_bytes_to_tmpfile(pub)))
+    assert result.valid is False
+    assert "duplicate" in (result.reason or "").lower()
 
 
 def test_bundle_rejects_nul_in_member_name(tmp_path: Path) -> None:
@@ -511,7 +544,7 @@ def test_bundle_rejects_nul_in_member_name(tmp_path: Path) -> None:
 def test_build_rejects_malformed_span_id(tmp_path: Path) -> None:
     """build_bundle refuses spans whose id contains path-traversal chars."""
     priv, pub = generate_keypair()
-    bad_span = Span(
+    bad_span = Span.model_construct(
         id="../../etc/passwd",
         trace_id="0" * 32,
         parent_ids=[],
@@ -521,7 +554,7 @@ def test_build_rejects_malformed_span_id(tmp_path: Path) -> None:
         ended_at=datetime(2024, 1, 1, tzinfo=UTC),
         status=SpanStatus.OK,
     )
-    trace = Trace(
+    trace = Trace.model_construct(
         trace_id="0" * 32,
         root_span_id="../../etc/passwd",
         spans=[bad_span],

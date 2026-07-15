@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import json
 import re
-import sqlite3
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,6 +31,8 @@ from pathlib import Path
 from clew.core.models import Span, SpanStatus, SpanType
 from clew.core.store import Store
 from clew.core.trace import TraceStore
+
+MAX_METADATA_VALUE_BYTES = 65_536
 
 
 @dataclass(frozen=True)
@@ -49,6 +50,11 @@ class QueryFilter:
     trace_id: str | None = None
     metadata: dict[str, object] | None = None
     limit: int = 50
+
+    def __post_init__(self) -> None:
+        """Reject ambiguous or non-positive result limits."""
+        if isinstance(self.limit, bool) or not isinstance(self.limit, int) or self.limit <= 0:
+            raise ValueError("query limit must be a positive integer")
 
     def to_dict(self) -> dict[str, object]:
         """Serialize the filter as a JSON-safe dict."""
@@ -112,31 +118,9 @@ def query(root: Path, filt: QueryFilter) -> list[QueryResult]:
     type, status). For the more expensive ones (name, metadata) we
     fall back to walking span files.
     """
-    store = Store(root)
+    store = Store(root, read_only=True)
     ts = TraceStore(store)
-    # Get all distinct trace ids, optionally filtered at the index.
-    with sqlite3.connect(store.root / "index.sqlite") as conn:
-        if filt.trace_id is not None:
-            rows = conn.execute(
-                "SELECT DISTINCT trace_id FROM spans WHERE trace_id = ?",
-                (filt.trace_id,),
-            ).fetchall()
-        elif filt.type is not None or filt.status is not None:
-            clauses: list[str] = []
-            params: list[object] = []
-            if filt.type is not None:
-                clauses.append("type = ?")
-                params.append(filt.type.value)
-            if filt.status is not None:
-                clauses.append("status = ?")
-                params.append(filt.status.value)
-            where = " AND ".join(clauses)
-            rows = conn.execute(
-                f"SELECT DISTINCT trace_id FROM spans WHERE {where}", params
-            ).fetchall()
-        else:
-            rows = conn.execute("SELECT DISTINCT trace_id FROM spans").fetchall()
-    trace_ids = [r[0] for r in rows]
+    trace_ids = [filt.trace_id] if filt.trace_id is not None else list(store.iter_traces())
 
     results: list[QueryResult] = []
     for tid in trace_ids:
@@ -172,10 +156,16 @@ def parse_metadata_spec(specs: Iterable[str]) -> dict[str, object]:
         if "=" not in spec:
             raise ValueError(f"metadata spec must be key=value, got {spec!r}")
         k, v = spec.split("=", 1)
+        if len(v.encode("utf-8")) > MAX_METADATA_VALUE_BYTES:
+            raise ValueError(
+                f"metadata value for {k!r} exceeds the {MAX_METADATA_VALUE_BYTES}-byte limit"
+            )
         try:
             out[k] = json.loads(v)
         except json.JSONDecodeError:
             out[k] = v
+        except RecursionError as exc:
+            raise ValueError(f"metadata value for {k!r} is nested too deeply") from exc
     return out
 
 
@@ -190,6 +180,7 @@ _LIKE_HINT = re.compile(r"[%_]")
 
 
 __all__ = [
+    "MAX_METADATA_VALUE_BYTES",
     "QueryFilter",
     "QueryResult",
     "parse_metadata_spec",

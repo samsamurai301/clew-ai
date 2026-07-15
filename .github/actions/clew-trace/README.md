@@ -8,13 +8,17 @@ exports the trace as an HTML report.
 ## Usage
 
 ```yaml
-- uses: clew/clew/.github/actions/clew-trace@main
+- uses: samsamurai301/clew-ai/.github/actions/clew-trace@main
   with:
     run: pytest tests/
     artifact-name: test-trace
+    upload: 'true'
 ```
 
-After the run, the action uploads two artifacts:
+The secure default runs the command with a minimal environment and does not upload trace
+data. Set `upload: 'true'` only when the command, stdout, and stderr are safe to retain;
+Clew traces are debugging records, not a DLP or secret-redaction boundary. When enabled,
+the action uploads two artifacts:
 
 - `<artifact-name>/.clew` — the full clew store (you can `clew
   show` any trace with this).
@@ -23,4 +27,4 @@ After the run, the action uploads two artifacts:
 
 ## See also
 
-- [The clew docs](https://github.com/clew/clew)
+- [The clew docs](https://github.com/samsamurai301/clew-ai)

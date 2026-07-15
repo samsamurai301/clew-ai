@@ -4,8 +4,8 @@ A clew repository is a single directory tree rooted at ``.clew/``. This
 module locates that directory in two flavors:
 
 * :func:`clew_root` — search the current working directory and up to
-  five ancestors for an existing ``.clew/``; if none is found, create
-  one at the starting directory.
+  five ancestors for an existing ``.clew/``; if none is found, return
+  the expected path without creating it.
 * :func:`global_clew_root` — the user-wide data directory for clew,
   typically ``~/.clew/`` on Linux and the platform-specific equivalent
   on macOS / Windows.
@@ -13,6 +13,7 @@ module locates that directory in two flavors:
 
 from __future__ import annotations
 
+import stat
 from pathlib import Path
 from typing import Final
 
@@ -30,31 +31,38 @@ _APP_NAME: Final[str] = "clew"
 
 
 def clew_root(cwd: Path | None = None) -> Path:
-    """Locate the ``.clew/`` directory for ``cwd``, creating one if missing.
+    """Locate the ``.clew/`` directory for ``cwd`` without modifying disk.
 
     The search starts at ``cwd`` (or :func:`Path.cwd` if ``cwd`` is
     ``None``) and walks up to ``_MAX_PARENT_DEPTH + 1`` directories
     (the starting directory itself plus up to five ancestors). The
     first ``.clew/`` encountered is returned.
 
-    If no ``.clew/`` is found in that range, a new one is created at
-    the *original* ``cwd`` (not the deepest ancestor searched). The
-    function always returns a path that exists.
+    If no ``.clew/`` is found in that range, the expected path under the
+    original ``cwd`` is returned but not created. Initialization belongs
+    exclusively to ``clew init`` or an explicit :class:`Store` creation.
     """
     start = (cwd or Path.cwd()).resolve()
     current = start
     for _ in range(_MAX_PARENT_DEPTH + 1):
         candidate = current / _CLEW_DIRNAME
-        if candidate.is_dir():
+        try:
+            metadata = candidate.lstat()
+        except FileNotFoundError:
+            metadata = None
+        if metadata is not None and stat.S_ISLNK(metadata.st_mode):
+            raise ValueError(
+                f"refusing symlinked Clew store at {candidate}; archive or remove the link "
+                "and select a real .clew directory"
+            )
+        if metadata is not None and stat.S_ISDIR(metadata.st_mode):
             return candidate
         parent = current.parent
         if parent == current:
             # Reached the filesystem root without finding a .clew/.
             break
         current = parent
-    new_root = start / _CLEW_DIRNAME
-    new_root.mkdir(parents=True, exist_ok=True)
-    return new_root
+    return start / _CLEW_DIRNAME
 
 
 def global_clew_root() -> Path:

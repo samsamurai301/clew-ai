@@ -4,6 +4,12 @@ clew ships with auto-instrumentation for the OpenAI and
 Anthropic Python SDKs. The bridge wraps the client's
 `create` method so every call writes a `clew` span.
 
+```bash
+uv add 'clew-ai[openai]'
+# or
+uv add 'clew-ai[anthropic]'
+```
+
 ## Quick example
 
 ```python
@@ -58,7 +64,7 @@ For each call, the bridge records:
 |---|---|
 | `span.name` | `openai.chat.completions.create` or `anthropic.messages.create` |
 | `span.type` | `SpanType.LLM` |
-| `span.input` | the kwargs (model, messages, etc.) |
+| `span.input` | positional arguments and redacted kwargs |
 | `span.output` | the response's first message content |
 | `span.attributes["gen_ai.system"]` | `"openai"` or `"anthropic"` |
 | `span.attributes["gen_ai.request.model"]` | the model name |
@@ -70,7 +76,13 @@ For each call, the bridge records:
 
 `instrument_openai(client)` and `instrument_anthropic(client)`
 are safe to call multiple times. A second call on the same
-client is a no-op; the existing wrap is preserved.
+client with the same tracer is a no-op; the existing wrap is preserved. Passing a
+different explicit tracer for an already wrapped client raises `ValueError`, preventing
+prompts and outputs from silently remaining pinned to the first tracer's store.
+
+Both synchronous and asynchronous clients are supported. Nested calls inherit the active
+Clew span through task-local context. Credential-shaped keys such as `api_key`, `token`,
+`authorization`, and `password` are replaced with `[REDACTED]` before persistence.
 
 ## What it does NOT do
 
@@ -79,8 +91,7 @@ purely observational layer. If you want retries, use the
 upstream SDK's `with_retries` (or your own wrapper). If you
 want cost tracking, sum
 `gen_ai.usage.input_tokens + gen_ai.usage.output_tokens`
-across the spans (or use the OTel collector's built-in
-metrics).
+across the spans or export the data into the metrics system your application already uses.
 
 ## See also
 

@@ -1,9 +1,10 @@
 site_name: clew
-site_description: git for AI reasoning — trace, branch, replay, and diff your agent runs locally.
-site_url: https://clew.dev
-repo_url: https://github.com/clew/clew
-repo_name: clew/clew
+site_description: A zero-server, Git-like what-if debugger for Python agent traces.
+site_url: https://samsamurai301.github.io/clew-ai/
+repo_url: https://github.com/samsamurai301/clew-ai
+repo_name: samsamurai301/clew-ai
 edit_uri: edit/main/docs/
+strict: true
 
 theme:
   name: material
@@ -69,16 +70,13 @@ markdown_extensions:
 
 plugins:
   - search
-  - social
-  - git-revision-date-localized:
-      enable_creation_date: true
 
 extra:
   social:
     - icon: fontawesome/brands/github
-      link: https://github.com/clew/clew
+      link: https://github.com/samsamurai301/clew-ai
     - icon: fontawesome/brands/python
-      link: https://pypi.org/project/clew
+      link: https://pypi.org/project/clew-ai
 
 nav:
   - Home: index.md
@@ -102,7 +100,8 @@ nav:
       - LangChain: integrations/langchain.md
   - Internals:
       - Architecture: internals/architecture.md
-      - Content addressing: internals/content-addressing.md
+      - Performance contract: BENCHMARKS.md
+      - Occurrence identity and integrity: internals/content-addressing.md
       - Replay engine: internals/replay.md
       - Bundle format: internals/bundle-format.md
   - Reference:
@@ -114,3 +113,5 @@ nav:
       - Contributing: contributing.md
       - Migration: migration.md
       - Changelog: changelog.md
+      - Release checklist: RELEASE.md
+      - Launch kit: LAUNCH.md

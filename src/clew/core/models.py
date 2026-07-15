@@ -17,7 +17,9 @@ Conventions
 * Datetimes are timezone-aware UTC (``datetime`` instances with
   ``tzinfo=timezone.utc``). Pydantic serializes them as RFC 3339
   strings with the trailing ``Z`` for UTC.
-* SHA-256 hex ids are 64-character lowercase hexadecimal strings.
+* Span and trace ids are independent 32-character UUID hex strings.
+* ``content_hash`` is a 64-character SHA-256 integrity digest computed only
+  after the span is final.
 """
 
 from __future__ import annotations
@@ -34,6 +36,9 @@ from pydantic import BaseModel, ConfigDict, Field
 
 #: Length of a SHA-256 hex digest (lowercase).
 SHA256_HEX_LEN: Final[int] = 64
+
+#: Length of the hexadecimal representation of a UUID.
+UUID_HEX_LEN: Final[int] = 32
 
 #: Pattern-matching helper for SHA-256 hex strings. Not used as a strict
 #: validator on the model (we trust the store to produce correct ids),
@@ -70,12 +75,10 @@ class SpanType(StrEnum):
 
 
 class SpanStatus(StrEnum):
-    """The terminal state of a :class:`Span`.
+    """The terminal state of a persisted :class:`Span`.
 
-    ``RUNNING`` is only valid for in-flight spans that have not yet
-    been written to disk. The store rewrites ``RUNNING`` spans as
-    ``OK`` or ``ERROR`` when the operation completes (a separate
-    append, since spans are append-only).
+    In-flight state is deliberately internal to the tracer and is never
+    represented by a public or persisted ``Span``.
     """
 
     OK = "OK"
@@ -85,10 +88,8 @@ class SpanStatus(StrEnum):
     """The span raised or returned an error; ``Span.error`` carries
     the human-readable message."""
 
-    RUNNING = "RUNNING"
-    """The span is in flight. Not persisted in this state by the
-    canonical writer; see :class:`Span` docstring for the rewrite
-    protocol."""
+    SKIPPED = "SKIPPED"
+    """The span was not executed because a dependency failed."""
 
 
 # ---------------------------------------------------------------------------
@@ -113,12 +114,11 @@ _FROZEN_STRICT: Final[ConfigDict] = ConfigDict(
 
 
 class Span(BaseModel):
-    """A single content-addressed reasoning step.
+    """A single finalized reasoning step.
 
-    A span is the atomic unit of clew. Every span has a deterministic
-    SHA-256 ``id`` derived from the canonical-JSON serialization of
-    all *other* fields. The id is the path on disk; the content is
-    the bytes; they match by construction.
+    ``id`` identifies this occurrence and is independent of its content.
+    ``content_hash`` protects the exact persisted record. This separation
+    means two identical calls remain two independently addressable events.
 
     Spans are append-only: once written, they are never modified. To
     "edit" a span, create a new span with the new content and update
@@ -135,20 +135,20 @@ class Span(BaseModel):
 
     id: str = Field(
         ...,
+        min_length=UUID_HEX_LEN,
+        max_length=UUID_HEX_LEN,
+        pattern=r"^[0-9a-f]{32}$",
         description=(
-            "Lowercase hex (8-64 chars) of the canonical-JSON "
-            "serialization of this span with the `id` field removed. "
-            "Computed by `clew.utils.hash.content_hash`; the storage "
-            "layer is responsible for setting it before write. The "
-            "store layer also enforces the format — any non-hex "
-            "id is rejected before it can reach the filesystem."
+            "Unique lowercase UUID4 hex occurrence identity. It is not derived from span content."
         ),
     )
     trace_id: str = Field(
         ...,
+        min_length=UUID_HEX_LEN,
+        max_length=UUID_HEX_LEN,
+        pattern=r"^[0-9a-f]{32}$",
         description=(
-            "Lowercase hex of the root span of the trace this span "
-            "belongs to. Constant for every span in a trace."
+            "Independent lowercase UUID4 hex identity shared by every span in this execution trace."
         ),
     )
     parent_ids: list[str] = Field(
@@ -157,6 +157,11 @@ class Span(BaseModel):
             "Ordered list of direct parent span ids. Empty for the "
             "root span of a trace; multiple for join/merge spans."
         ),
+    )
+    sequence: int = Field(
+        default=0,
+        ge=0,
+        description="Unique, monotonically increasing execution order in the trace.",
     )
 
     # ---- kind ------------------------------------------------------------
@@ -204,18 +209,14 @@ class Span(BaseModel):
     )
     ended_at: datetime = Field(
         ...,
-        description=(
-            "UTC wall-clock end time, timezone-aware. Always >= "
-            "started_at; for a RUNNING span, equals started_at."
-        ),
+        description=("UTC wall-clock end time, timezone-aware. Always >= started_at."),
     )
-    status: SpanStatus = Field(..., description="OK, ERROR, or RUNNING.")
+    status: SpanStatus = Field(..., description="OK, ERROR, or SKIPPED.")
 
     error: str | None = Field(
         default=None,
         description=(
-            "Human-readable error message. Only populated when "
-            "status == ERROR. None otherwise."
+            "Human-readable error message. Only populated when status == ERROR. None otherwise."
         ),
     )
 
@@ -225,8 +226,14 @@ class Span(BaseModel):
         default=None,
         description=(
             "Optional free-form provenance (SDK version, host, model "
-            "id, etc.). Not content-addressed — included in the hash "
-            "but not required to be meaningful across runs."
+            "id, etc.). Included in the integrity hash."
+        ),
+    )
+    content_hash: str = Field(
+        default="",
+        description=(
+            "SHA-256 of canonical JSON for every persisted field except "
+            "content_hash itself. Computed after finalization."
         ),
     )
 
@@ -244,11 +251,39 @@ class Span(BaseModel):
                 "Span.status is ERROR but Span.error is empty; "
                 "an ERROR span must carry a non-empty error message."
             )
+        if self.status is not SpanStatus.ERROR and self.error:
+            raise ValueError(
+                "Span.error is populated but status is not ERROR; "
+                "only ERROR spans may carry an error message."
+            )
+        if len(set(self.parent_ids)) != len(self.parent_ids):
+            raise ValueError("Span.parent_ids contains a duplicate parent id.")
+        for parent_id in self.parent_ids:
+            if len(parent_id) != UUID_HEX_LEN or any(
+                char not in "0123456789abcdef" for char in parent_id
+            ):
+                raise ValueError(
+                    f"Span.parent_ids contains malformed id {parent_id!r}; "
+                    "expected 32 lowercase hexadecimal characters."
+                )
+        if self.id in self.parent_ids:
+            raise ValueError("Span cannot list itself as a parent.")
         if self.ended_at < self.started_at:
             raise ValueError(
                 "Span.ended_at is before Span.started_at; "
                 f"got started_at={self.started_at!r} "
                 f"ended_at={self.ended_at!r}."
+            )
+        # Import lazily to avoid a module cycle: hash utilities depend on Span.
+        from clew.utils.hash import span_hash
+
+        expected_hash = span_hash(self)
+        if not self.content_hash:
+            object.__setattr__(self, "content_hash", expected_hash)
+        elif self.content_hash != expected_hash:
+            raise ValueError(
+                "Span.content_hash does not match the finalized record: "
+                f"expected {expected_hash}, got {self.content_hash}."
             )
 
 
@@ -258,11 +293,10 @@ class Span(BaseModel):
 
 
 class Trace(BaseModel):
-    """A Merkle-DAG projection over a set of spans sharing a ``trace_id``.
+    """A DAG projection over a set of spans sharing a ``trace_id``.
 
     A ``Trace`` is a *convenience* object: the source of truth is the
-    set of span files in ``.clew/objects/span/<id>`` and the
-    append-only JSONL log at ``.clew/traces/<trace_id>.jsonl``. The
+    set of immutable JSON span records under ``.clew/spans/``. The
     TUI and SDK frequently want the whole tree in one object, so we
     provide it here.
 
@@ -274,33 +308,61 @@ class Trace(BaseModel):
 
     trace_id: str = Field(
         ...,
-        description="SHA-256 hex of the root span of the trace.",
+        description="Independent 32-character UUID hex trace identity.",
     )
     root_span_id: str = Field(
         ...,
-        description=(
-            "Span id of the trace's entry span (no parents within "
-            "this trace)."
-        ),
+        description=("Span id of the trace's entry span (no parents within this trace)."),
     )
     spans: list[Span] = Field(
         default_factory=list,
         description=(
-            "All spans in the trace, in insertion order (the order "
-            "they were appended to the JSONL log). Does not have to "
-            "be topologically sorted."
+            "All spans in deterministic sequence order. Parents must appear before their children."
         ),
     )
 
     def model_post_init(self, __context: object) -> None:
-        """Sanity-check that root_span_id is reachable from the spans."""
+        """Validate identity, ordering, and complete DAG topology."""
         ids = {span.id for span in self.spans}
+        if len(ids) != len(self.spans):
+            raise ValueError("Trace.spans contains duplicate span ids.")
         if self.root_span_id not in ids:
             raise ValueError(
                 f"Trace.root_span_id={self.root_span_id!r} is not "
                 "present in Trace.spans; every trace must contain its "
                 "root span."
             )
+        foreign = [span.id for span in self.spans if span.trace_id != self.trace_id]
+        if foreign:
+            raise ValueError(f"Trace contains spans with a different trace_id: {foreign}.")
+        sequences = [span.sequence for span in self.spans]
+        if len(sequences) != len(set(sequences)):
+            raise ValueError("Trace contains duplicate sequence values.")
+        roots = [span.id for span in self.spans if not span.parent_ids]
+        if roots != [self.root_span_id]:
+            raise ValueError(
+                f"Trace must have exactly root_span_id={self.root_span_id!r}; found roots {roots}."
+            )
+        for span in self.spans:
+            missing = [parent for parent in span.parent_ids if parent not in ids]
+            if missing:
+                raise ValueError(f"Span {span.id} has missing parents {missing}.")
+        in_degree = {span.id: len(span.parent_ids) for span in self.spans}
+        children: dict[str, list[str]] = {span.id: [] for span in self.spans}
+        for span in self.spans:
+            for parent_id in span.parent_ids:
+                children[parent_id].append(span.id)
+        ready = [span_id for span_id, degree in in_degree.items() if degree == 0]
+        resolved_count = 0
+        while ready:
+            span_id = ready.pop()
+            resolved_count += 1
+            for child_id in children[span_id]:
+                in_degree[child_id] -= 1
+                if in_degree[child_id] == 0:
+                    ready.append(child_id)
+        if resolved_count != len(self.spans):
+            raise ValueError("Trace topology contains a cycle.")
 
 
 # ---------------------------------------------------------------------------
@@ -331,17 +393,14 @@ class Branch(BaseModel):
     )
     head_span_id: str = Field(
         ...,
-        description=(
-            "Span id at the tip of this branch. Must be a 64-char "
-            "lowercase hex SHA-256 string."
-        ),
+        min_length=UUID_HEX_LEN,
+        max_length=UUID_HEX_LEN,
+        pattern=r"^[0-9a-f]{32}$",
+        description=("Span occurrence id at the tip of this branch."),
     )
     created_at: datetime = Field(
         ...,
-        description=(
-            "UTC timestamp at which this branch was created. "
-            "Timezone-aware."
-        ),
+        description=("UTC timestamp at which this branch was created. Timezone-aware."),
     )
 
 
@@ -377,14 +436,14 @@ class Ref(BaseModel):
     )
     span_id: str = Field(
         ...,
-        description="Span id this ref resolves to (64-char hex SHA-256).",
+        min_length=UUID_HEX_LEN,
+        max_length=UUID_HEX_LEN,
+        pattern=r"^[0-9a-f]{32}$",
+        description="32-character UUID hex span occurrence id this ref resolves to.",
     )
     updated_at: datetime = Field(
         ...,
-        description=(
-            "UTC timestamp of the most recent write to this ref. "
-            "Timezone-aware."
-        ),
+        description=("UTC timestamp of the most recent write to this ref. Timezone-aware."),
     )
 
 
@@ -394,6 +453,7 @@ class Ref(BaseModel):
 
 __all__ = [
     "SHA256_HEX_LEN",
+    "UUID_HEX_LEN",
     "Branch",
     "Ref",
     "Span",

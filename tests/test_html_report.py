@@ -19,11 +19,13 @@ def _span(
     error: str | None = None,
     input: object = "x",
     output: object = "y",
+    sequence: int | None = None,
 ) -> Span:
     return Span(
         id=uuid4().hex,
         trace_id=trace_id,
         parent_ids=parent_ids or [],
+        sequence=(1 if parent_ids else 0) if sequence is None else sequence,
         type=type,
         name=name,
         attributes={"k": "v"},
@@ -104,6 +106,38 @@ def test_render_html_handles_empty_trace() -> None:
     assert "lone" in out
 
 
+def test_render_html_handles_more_than_python_recursion_limit() -> None:
+    trace_id = uuid4().hex
+    spans: list[Span] = []
+    for sequence in range(1_100):
+        spans.append(
+            _span(
+                trace_id,
+                name=f"step-{sequence}",
+                parent_ids=[spans[-1].id] if spans else [],
+                sequence=sequence,
+            )
+        )
+    output = render_html(_trace(*spans))
+    assert "step-1099" in output
+    assert output.count('<li><div class="span') == len(spans)
+
+
+def test_render_html_renders_multi_parent_span_once() -> None:
+    trace_id = uuid4().hex
+    root = _span(trace_id, name="root", sequence=0)
+    left = _span(trace_id, name="left", parent_ids=[root.id], sequence=1)
+    right = _span(trace_id, name="right", parent_ids=[root.id], sequence=2)
+    join = _span(
+        trace_id,
+        name="join",
+        parent_ids=[left.id, right.id],
+        sequence=3,
+    )
+    output = render_html(_trace(root, left, right, join))
+    assert output.count('<li><div class="span') == 4
+
+
 def test_render_html_includes_metadata() -> None:
     tid = uuid4().hex
     s = _span(tid)
@@ -144,7 +178,7 @@ def test_write_html_self_contained(tmp_path: Path) -> None:
     text = out.read_text(encoding="utf-8")
     # No <link rel="stylesheet" href=...> with http
     assert "http://" not in text or "w3.org" in text
-    assert "https://" not in text or "github.com/clew" in text
+    assert "https://" not in text or "github.com/samsamurai301/clew-ai" in text
     # The github.com link in the footer is the only external reference, and
     # it's just an attribution.
 
@@ -154,54 +188,45 @@ def test_write_html_self_contained(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_html_report_escapes_format_braces_in_trace_id() -> None:
-    """A trace id containing ``{name}`` cannot break the template."""
+def test_html_report_handles_format_braces_in_span_content() -> None:
+    """Attacker-controlled braces in span content cannot break the template."""
     from datetime import UTC, datetime
+
+    trace_id = "b" * 32
     span = Span(
         id="a" * 32,
-        trace_id="x" * 32,
+        trace_id=trace_id,
         parent_ids=[],
         type=SpanType.OBSERVATION,
-        name="x",
+        name="{generated_at.__class__}",
         started_at=datetime(2024, 1, 1, tzinfo=UTC),
         ended_at=datetime(2024, 1, 1, tzinfo=UTC),
         status=SpanStatus.OK,
     )
-    # Trace with a hostile trace_id
     trace = Trace(
-        trace_id="{trace_id}",  # attempts to re-substitute
+        trace_id=trace_id,
         root_span_id="a" * 32,
         spans=[span],
     )
-    # Must not raise and must produce a safe document
     out = render_html(trace)
-    # The {trace_id} literal in the original template is replaced by
-    # the escaped value, so we should see the encoded form
-    # &#123;trace_id&#125; somewhere in the output.
-    assert "&#123;trace_id&#125;" in out
-    # And the unescaped literal should NOT appear.
-    import re
-    # The literal {trace_id} outside the template placeholders
-    # would be in the substituted value. We check the <title>:
-    title = re.search(r"<title>(.*?)</title>", out)
-    assert title is not None
-    assert title.group(1) == "clew trace &#123;trace_id&#125;"
+    assert "{generated_at.__class__}" in out
 
 
 def test_html_report_escapes_html_in_name() -> None:
     """Span names with HTML are escaped, not interpreted."""
     from datetime import UTC, datetime
+
     span = Span(
         id="a" * 32,
-        trace_id="x" * 32,
+        trace_id="b" * 32,
         parent_ids=[],
         type=SpanType.OBSERVATION,
-        name='<script>alert(1)</script>',
+        name="<script>alert(1)</script>",
         started_at=datetime(2024, 1, 1, tzinfo=UTC),
         ended_at=datetime(2024, 1, 1, tzinfo=UTC),
         status=SpanStatus.OK,
     )
-    trace = Trace(trace_id="x" * 32, root_span_id="a" * 32, spans=[span])
+    trace = Trace(trace_id="b" * 32, root_span_id="a" * 32, spans=[span])
     out = render_html(trace)
     # The literal <script> must be escaped to &lt;script&gt;
     assert "<script>alert" not in out

@@ -1,11 +1,8 @@
-"""Structural diff of two clew traces.
+"""Structural diff of two Clew traces.
 
-A :class:`TraceDiff` compares two traces span-by-span. Spans are
-matched by their *path from the root* — the concatenation of
-``span.name`` along the parent chain. This is stable across the
-two traces as long as the structure is similar, even if individual
-span ids differ (which they will, because content-addressed spans
-get fresh ids on replay).
+Occurrences are matched by their full ancestry, type/name, and occurrence
+order among equivalent siblings. Repeated sibling names therefore remain
+distinct instead of overwriting one another in a dictionary.
 
 Three match outcomes are reported:
 
@@ -21,15 +18,15 @@ Three match outcomes are reported:
 
 from __future__ import annotations
 
+import heapq
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Any
 
 from clew.core.models import Span, Trace
 
-# Sentinel "path separator" used when joining span names. Unlikely
-# to appear in real span names because OTel semantic conventions
-# discourage punctuation in operation names.
-_PATH_SEP: str = "\x1f"
+StructuralKey = int
+StructuralSignature = tuple[tuple[StructuralKey, ...], str, str, int]
 
 
 @dataclass
@@ -60,34 +57,60 @@ class TraceDiff:
     unchanged_count: int = 0
 
 
-def _path_of(span: Span, by_id: dict[str, Span]) -> str:
-    """Return the canonical "path from root" of a span.
+def _index(
+    trace: Trace,
+    interner: dict[StructuralSignature, StructuralKey],
+) -> dict[StructuralKey, Span]:
+    """Build a collision-free structural index in linearithmic time.
 
-    The path is the tuple of names along the parent chain, root
-    first, joined by ``_PATH_SEP``. Spans with multiple parents
-    (DAG, not tree) get a deterministic path by following parents
-    in sorted order.
+    A shared interner gives equivalent structural occurrences in both traces
+    the same compact integer key. Parent ancestry is represented by already
+    interned parent keys, avoiding recursively nested tuples and repeated
+    hashing proportional to trace depth.
     """
-    chain: list[str] = []
-    seen: set[str] = set()
-    cursor: str | None = span.id
-    while cursor is not None and cursor not in seen:
-        seen.add(cursor)
-        node = by_id.get(cursor)
-        if node is None:
-            break
-        chain.append(node.name)
-        parents = sorted(node.parent_ids)
-        cursor = parents[0] if parents else None
-    chain.reverse()
-    return _PATH_SEP.join(chain)
+    by_id = {span.id: span for span in trace.spans}
+    in_degree = {span.id: len(span.parent_ids) for span in trace.spans}
+    children: dict[str, list[str]] = {span.id: [] for span in trace.spans}
+    missing: set[str] = set()
+    for span in trace.spans:
+        for parent in span.parent_ids:
+            if parent not in by_id:
+                missing.add(parent)
+            else:
+                children[parent].append(span.id)
+    if missing:
+        raise ValueError(
+            f"Cannot diff malformed trace topology; unresolved parents: {sorted(missing)}"
+        )
 
+    key_by_id: dict[str, StructuralKey] = {}
+    occurrence: dict[tuple[tuple[StructuralKey, ...], str, str], int] = {}
+    ready = [
+        (by_id[span_id].sequence, span_id) for span_id, degree in in_degree.items() if degree == 0
+    ]
+    heapq.heapify(ready)
+    while ready:
+        _, span_id = heapq.heappop(ready)
+        span = by_id[span_id]
+        parent_keys = tuple(key_by_id[parent] for parent in span.parent_ids)
+        sibling_group = (parent_keys, span.type.value, span.name)
+        ordinal = occurrence.get(sibling_group, 0)
+        occurrence[sibling_group] = ordinal + 1
+        signature = (*sibling_group, ordinal)
+        key = interner.setdefault(signature, len(interner))
+        key_by_id[span.id] = key
+        for child_id in children[span_id]:
+            in_degree[child_id] -= 1
+            if in_degree[child_id] == 0:
+                child = by_id[child_id]
+                heapq.heappush(ready, (child.sequence, child.id))
 
-def _index(trace: Trace) -> tuple[dict[str, Span], dict[str, str]]:
-    """Return ``(by_id, path_by_id)`` for a trace."""
-    by_id = {s.id: s for s in trace.spans}
-    path_by_id = {sid: _path_of(span, by_id) for sid, span in by_id.items()}
-    return by_id, path_by_id
+    if len(key_by_id) != len(trace.spans):
+        unresolved = sorted(set(by_id) - set(key_by_id))
+        raise ValueError(
+            f"Cannot diff malformed trace topology; cycle involves spans: {unresolved}"
+        )
+    return {key_by_id[span.id]: span for span in trace.spans}
 
 
 def diff(trace_a: Trace, trace_b: Trace) -> TraceDiff:
@@ -103,12 +126,9 @@ def diff(trace_a: Trace, trace_b: Trace) -> TraceDiff:
     ``modified`` are each sorted by the path string, so two calls
     with the same inputs produce the same output.
     """
-    _, paths_a = _index(trace_a)
-    _, paths_b = _index(trace_b)
-    spans_by_path_a: dict[str, Span] = dict.fromkeys(paths_a.values(), trace_a.spans[0])  # placeholder
-    # Build proper maps.
-    spans_by_path_a = {paths_a[s.id]: s for s in trace_a.spans}
-    spans_by_path_b = {paths_b[s.id]: s for s in trace_b.spans}
+    interner: dict[StructuralSignature, StructuralKey] = {}
+    spans_by_path_a = _index(trace_a, interner)
+    spans_by_path_b = _index(trace_b, interner)
     added: list[Span] = []
     removed: list[Span] = []
     modified: list[tuple[Span, Span]] = []
@@ -148,6 +168,7 @@ def _content_hash(span: Span) -> str:
     their parent ids were freshly minted.
     """
     from clew.utils.hash import content_hash as _ch
+
     payload: dict[str, Any] = {
         "type": span.type,
         "name": span.name,
@@ -155,6 +176,8 @@ def _content_hash(span: Span) -> str:
         "input": span.input,
         "output": span.output,
         "status": span.status,
+        "error": span.error,
+        "metadata": span.metadata,
     }
     return _ch(payload)
 
@@ -173,12 +196,25 @@ def format_text(d: TraceDiff) -> str:
         f"@@ {len(d.modified)} modified, +{len(d.added)} -{len(d.removed)}, {d.unchanged_count} unchanged @@"
     )
     for a, b in d.modified:
-        lines.append(f"~ {a.name} (input={a.input!r}, output={a.input!r} -> {b.output!r})")
+        lines.append(
+            f"~ {_terminal_safe(a.name)} "
+            f"(input={_terminal_safe(repr(a.input))}, "
+            f"output={_terminal_safe(repr(a.output))} -> "
+            f"{_terminal_safe(repr(b.output))})"
+        )
     for span in d.added:
-        lines.append(f"+ {span.name}: {span.output!r}")
+        lines.append(f"+ {_terminal_safe(span.name)}: {_terminal_safe(repr(span.output))}")
     for span in d.removed:
-        lines.append(f"- {span.name}: {span.output!r}")
+        lines.append(f"- {_terminal_safe(span.name)}: {_terminal_safe(repr(span.output))}")
     return "\n".join(lines)
+
+
+def _terminal_safe(value: str) -> str:
+    """Neutralize invisible terminal controls in hostile trace text."""
+    return "".join(
+        f"\\u{ord(char):04x}" if unicodedata.category(char) in {"Cc", "Cf"} else char
+        for char in value
+    )
 
 
 def format_json(d: TraceDiff) -> str:
@@ -202,9 +238,7 @@ def format_json(d: TraceDiff) -> str:
             "trace_b": d.trace_id_b,
             "added": [_span_dict(s) for s in d.added],
             "removed": [_span_dict(s) for s in d.removed],
-            "modified": [
-                {"before": _span_dict(a), "after": _span_dict(b)} for a, b in d.modified
-            ],
+            "modified": [{"before": _span_dict(a), "after": _span_dict(b)} for a, b in d.modified],
             "unchanged_count": d.unchanged_count,
         },
         indent=2,

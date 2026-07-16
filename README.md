@@ -4,6 +4,7 @@
 [![PyPI](https://img.shields.io/pypi/v/clew-ai.svg)](https://pypi.org/project/clew-ai/)
 [![Python](https://img.shields.io/pypi/pyversions/clew-ai.svg)](https://pypi.org/project/clew-ai/)
 [![Coverage](https://codecov.io/gh/samsamurai301/clew-ai/branch/main/graph/badge.svg)](https://codecov.io/gh/samsamurai301/clew-ai)
+[![Docs](https://img.shields.io/badge/docs-online-6f42c1)](https://samsamurai301.github.io/clew-ai/)
 
 **A zero-server, Git-like what-if debugger for Python agent traces.**
 
@@ -57,6 +58,13 @@ uv add 'clew-ai[anthropic]'
 ```
 
 Clew 1.1.5 supports Python 3.11 through 3.14.
+
+## Community
+
+Have a question, integration idea, or workflow to share? Use [GitHub Discussions](https://github.com/samsamurai301/clew-ai/discussions).
+Bug reports and small pull requests are welcome; see [contributing](CONTRIBUTING.md), the
+[roadmap](ROADMAP.md), and [support guidance](.github/SUPPORT.md). Please never share raw
+traces that contain prompts, credentials, personal data, or provider responses.
 
 ## Workflow 1: trace a custom Python agent
 

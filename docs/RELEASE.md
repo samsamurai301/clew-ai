@@ -1,17 +1,17 @@
-# 1.1.5 release checklist
+# Clew release checklist
 
-Clew 1.1.5 is a breaking corrective Beta release. Release only from a clean `main` commit
-after every automated and human gate below passes.
+Release only from a clean `main` commit after every automated and human gate below passes.
+The version in `pyproject.toml`, the `v<version>` tag, the distributions, and the GitHub
+release must always agree.
 
 ## Containment before release
 
-- Revoke the PyPI token that appeared in the working directory and conversation history.
-- Confirm `token.txt` is absent from the repository and local workspace.
-- Yank PyPI 1.1.4 with the reason: **trace identity collisions and incorrect project
-  links; use 1.1.5 or later**.
-- Leave the existing `v1.1.4` tag unchanged. Record that it does not reproduce the manually
-  uploaded artifact.
-- Make `main` the GitHub default branch and enable private vulnerability reporting.
+- Never store a PyPI token in the repository, CI variables, or shell history. Trusted
+  publishing is the release path.
+- For a compromised or broken release, yank it with a clear migration reason and publish
+  a new version. Never replace an uploaded artifact.
+- Keep the GitHub default branch, protected-branch rules, and private vulnerability
+  reporting enabled.
 
 These are account-level actions and cannot be proven by repository code alone.
 
@@ -26,7 +26,7 @@ uv run pytest --cov=clew --cov-branch --cov-report=term-missing
 uv run mkdocs build --strict
 uv run pip-audit
 uv build
-uv run twine check dist/clew_ai-1.1.5*
+uv run twine check dist/*
 ```
 
 CI additionally verifies Python 3.11–3.14 on Linux, branch coverage of at least 85%,
@@ -44,12 +44,32 @@ remain unresolved. Record evidence outside the runtime; 1.1.5 sends no adoption 
 
 ## Publication
 
-1. Publish the exact candidate commit to TestPyPI through trusted publishing.
-2. Install from TestPyPI and repeat the complete user journey.
-3. Confirm version 1.1.5, changelog, compatibility notice, and tag alignment.
-4. Push the tag. CI rebuilds and verifies the tag, publishes through trusted publishing,
+1. Update `pyproject.toml`, `CHANGELOG.md`, and relevant docs in a focused PR.
+2. Publish the exact candidate commit to TestPyPI through trusted publishing.
+3. Install from TestPyPI and repeat the complete user journey.
+4. Confirm the version, changelog, compatibility notice, and tag alignment.
+5. Push the matching tag (`git tag v<version> && git push origin v<version>`). CI rebuilds
+   and verifies the tag, publishes through trusted publishing,
    deploys GitHub Pages, and creates the GitHub release.
-5. Verify PyPI installation and every public link from a clean machine.
+6. Verify PyPI installation and every public link from a clean machine.
 
-Never replace an uploaded artifact. If a critical regression is found, yank 1.1.5 and
-publish 1.1.6.
+## One-time PyPI/GitHub connection
+
+On PyPI, open the `clew-ai` project settings and add a trusted publisher:
+
+- Owner: `samsamurai301`
+- Repository: `clew-ai`
+- Workflow: `.github/workflows/release.yml`
+- Environment: `pypi`
+
+Add a second publisher with environment `testpypi` on TestPyPI. In GitHub, create the
+`pypi` and `testpypi` environments, require approval for `pypi`, and restrict deployments
+to the `main` branch and `v*` tags. No `PYPI_API_TOKEN` secret is needed.
+
+## Future release policy
+
+- Patch: bug fixes, docs, and safe compatibility changes.
+- Minor: new public capabilities or integrations.
+- Major: intentional breaking API, CLI, or persisted-format changes.
+- Every release gets a changelog entry, a migration note when needed, and clean install
+  smoke tests for both the wheel and sdist.

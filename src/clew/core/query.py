@@ -33,6 +33,7 @@ from clew.core.store import Store
 from clew.core.trace import TraceStore
 
 MAX_METADATA_VALUE_BYTES = 65_536
+MAX_METADATA_NESTING = 128
 
 
 @dataclass(frozen=True)
@@ -160,6 +161,26 @@ def parse_metadata_spec(specs: Iterable[str]) -> dict[str, object]:
             raise ValueError(
                 f"metadata value for {k!r} exceeds the {MAX_METADATA_VALUE_BYTES}-byte limit"
             )
+        depth = 0
+        in_string = False
+        escaped = False
+        for char in v:
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    in_string = False
+                continue
+            if char == '"':
+                in_string = True
+            elif char in "[{":
+                depth += 1
+                if depth > MAX_METADATA_NESTING:
+                    raise ValueError(f"metadata value for {k!r} is nested too deeply")
+            elif char in "]}":
+                depth = max(0, depth - 1)
         try:
             out[k] = json.loads(v)
         except json.JSONDecodeError:
@@ -180,6 +201,7 @@ _LIKE_HINT = re.compile(r"[%_]")
 
 
 __all__ = [
+    "MAX_METADATA_NESTING",
     "MAX_METADATA_VALUE_BYTES",
     "QueryFilter",
     "QueryResult",

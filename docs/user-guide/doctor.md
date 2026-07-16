@@ -64,8 +64,7 @@ clew gc
 # scanned 50 spans, deleted 3, kept 47
 ```
 
-A span is "orphan" iff it is not in the closure of any ref's
-head (i.e., it is not an ancestor of any current branch head).
+A span is "orphan" iff its trace is not referenced by any branch.
 This is what happens naturally when you delete a branch:
 the spans that were only reachable through that branch are
 left behind, and `clew gc` cleans them up.
@@ -74,9 +73,11 @@ left behind, and `clew gc` cleans them up.
 prints exactly what would be deleted. Run it once to make sure
 the report looks right, then run it for real.
 
-`gc` does not touch the SQLite index, the refs, the manifest,
-or HEAD. It only deletes span shard files that no ref can
-reach.
+By default, `gc` retains unreferenced records newer than five minutes so it cannot race
+an ordinary in-progress trace write. Use `--grace-seconds` to increase that window; setting
+it to `0` is intended only when you know no writer is active. After deletion, `gc` rebuilds
+the SQLite index from the remaining verified records. It never changes refs, the manifest,
+or HEAD.
 
 ## When to use
 
@@ -93,4 +94,4 @@ reach.
 
 ## See also
 
-- [Internals: store layout](../internals/architecture.md#store-layout)
+- [Internals: store layout](../internals/architecture.md#store-v2)

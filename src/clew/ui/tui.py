@@ -15,15 +15,16 @@ Keybindings:
 
 from __future__ import annotations
 
-import asyncio
 import json
 from pathlib import Path
 
+from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.reactive import reactive
 from textual.widgets import DataTable, Footer, Header, Static, Tree
+from textual.widgets.tree import TreeNode
 
 from clew.core.branch import BranchManager
 from clew.core.diff import diff as diff_traces
@@ -31,9 +32,34 @@ from clew.core.models import Span
 from clew.core.replay import MockExecutor, ReplayEngine
 from clew.core.store import Store
 from clew.core.trace import TraceStore
+from clew.ui.render import _terminal_safe
 
 
-class _TraceList(DataTable):
+def _span_tree_label(span: Span) -> Text:
+    label = Text()
+    label.append(f"[{_terminal_safe(span.type)}] ", style="dim")
+    label.append(_terminal_safe(span.name), style="bold")
+    label.append(f" ({_terminal_safe(span.status)})")
+    return label
+
+
+def _span_details(span: Span) -> Text:
+    details = Text()
+    details.append(_terminal_safe(span.name), style="bold")
+    details.append(f"  [{_terminal_safe(span.type)}]  {_terminal_safe(span.status)}\n")
+    details.append(f"id: {_terminal_safe(span.id)}\n")
+    details.append(f"parent_ids: {_terminal_safe(span.parent_ids)}\n")
+    details.append("input: " + _terminal_safe(json.dumps(span.input, indent=2, default=str)) + "\n")
+    details.append(
+        "output: " + _terminal_safe(json.dumps(span.output, indent=2, default=str)) + "\n"
+    )
+    details.append(
+        "attributes: " + _terminal_safe(json.dumps(span.attributes, indent=2, default=str))
+    )
+    return details
+
+
+class _TraceList(DataTable[str]):
     """The list of traces on the left side."""
 
     def on_mount(self) -> None:
@@ -41,15 +67,15 @@ class _TraceList(DataTable):
         self.add_columns("trace", "spans")
 
 
-class _SpanTree(Tree):
+class _SpanTree(Tree[dict[str, str] | None]):
     """The span tree for the selected trace."""
 
-    def __init__(self, label: str = "trace") -> None:
-        super().__init__(label)
+    def __init__(self, label: str = "trace", *, id: str | None = None) -> None:
+        super().__init__(label, id=id)
         self.show_root = False
 
 
-class TraceBrowserApp(App):
+class TraceBrowserApp(App[None]):
     """Top-level TUI app."""
 
     CSS = """
@@ -86,7 +112,7 @@ class TraceBrowserApp(App):
         yield Footer()
 
     def on_mount(self) -> None:
-        self.title = "clew — git for AI reasoning"
+        self.title = "clew — local agent what-if debugger"
         self.refresh_traces()
 
     def refresh_traces(self) -> None:
@@ -134,22 +160,26 @@ class TraceBrowserApp(App):
                         children.setdefault(p, []).append(s.id)
         rendered: set[str] = set()
 
-        def add(span_id: str, parent: Tree) -> None:
+        stack: list[tuple[str, TreeNode[dict[str, str] | None]]] = [
+            (root_id, tree.root) for root_id in reversed(roots)
+        ]
+        while stack:
+            span_id, parent = stack.pop()
             if span_id in rendered:
-                return
+                continue
             rendered.add(span_id)
             span = by_id[span_id]
-            label = f"[{span.type}] {span.name} ({span.status})"
-            node = parent.add(label, data={"span_id": span.id})
-            for c in children.get(span_id, []):
-                add(c, node)
+            node = parent.add(_span_tree_label(span), data={"span_id": span.id})
+            for child_id in reversed(children.get(span_id, [])):
+                stack.append((child_id, node))
 
         tree.show_root = True
-        tree.label = f"{self.selected_trace[:12]}… ({len(trace.spans)} spans)"
-        for r in roots:
-            add(r, tree)
+        tree.root.set_label(Text(f"{self.selected_trace[:12]}… ({len(trace.spans)} spans)"))
 
-    def on_tree_node_selected(self, event: Tree.NodeSelected) -> None:
+    def on_tree_node_selected(
+        self,
+        event: Tree.NodeSelected[dict[str, str] | None],
+    ) -> None:
         """When a span is selected, show its details."""
         data = event.node.data
         if not isinstance(data, dict):
@@ -166,14 +196,7 @@ class TraceBrowserApp(App):
         if span is None:
             return
         details = self.query_one("#details", Static)
-        details.update(
-            f"[bold]{span.name}[/bold]  [{span.type}]  {span.status}\n"
-            f"id: {span.id}\n"
-            f"parent_ids: {span.parent_ids}\n"
-            f"input: {json.dumps(span.input, indent=2, default=str)}\n"
-            f"output: {json.dumps(span.output, indent=2, default=str)}\n"
-            f"attributes: {json.dumps(span.attributes, indent=2, default=str)}"
-        )
+        details.update(_span_details(span))
 
     # -- actions --------------------------------------------------------
 
@@ -185,17 +208,13 @@ class TraceBrowserApp(App):
         self._bm.create(name, self.selected_span)
         self.refresh_traces()
 
-    def action_replay(self) -> None:
+    async def action_replay(self) -> None:
         """Replay the selected trace with the mock executor."""
-        if not self.selected_trace:
+        trace_id = self.selected_trace
+        if not trace_id:
             return
-
-        async def _run() -> str:
-            engine = ReplayEngine(self._ts, executor=MockExecutor())
-            new_trace = await engine.replay(self.selected_trace)
-            return new_trace.trace_id
-
-        asyncio.run(_run())
+        engine = ReplayEngine(self._ts, executor=MockExecutor())
+        await engine.replay(trace_id)
         self.refresh_traces()
 
     def action_diff(self) -> None:

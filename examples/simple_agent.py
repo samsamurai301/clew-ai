@@ -40,7 +40,10 @@ def make_plan(question: str) -> dict[str, str]:
 @t.span("fake_search", type=SpanType.TOOL)
 def fake_search(query: str) -> list[str]:
     """Pretend to search the web."""
-    return [f"Result for {query}: clew is git for AI reasoning."]
+    return [
+        f"Result for {query}: Clew is a zero-server, Git-like what-if debugger "
+        "for Python agent traces."
+    ]
 
 
 @t.span("compose_answer", type=SpanType.LLM)

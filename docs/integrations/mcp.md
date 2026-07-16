@@ -20,10 +20,10 @@ talking to.
 
 ```bash
 # uv
-uv add 'clew[mcp]'
+uv add 'clew-ai[mcp]'
 
 # pip
-pip install 'clew[mcp]'
+pip install 'clew-ai[mcp]'
 ```
 
 ## Connect from Claude Desktop
@@ -62,7 +62,7 @@ Edit `~/.cursor/mcp.json`:
 
 ## Available tools
 
-The server exposes 12 tools, covering everything the CLI does:
+The server exposes 12 trace/store tools:
 
 | Tool | What it does |
 |---|---|
@@ -100,8 +100,7 @@ Plus two resources:
 > have worked. Want me to create a branch at the `search-tool`
 > span so you can re-run with a different search backend?
 
-That's the killer use case: instead of asking you to read the
-trace yourself, Claude reads it and proposes an action.
+The host decides whether and when to call these local tools.
 
 ## Privacy and security
 
@@ -110,12 +109,11 @@ permissions as the `clew` binary. It does not phone home, does
 not log to a central server, and does not retain any data
 beyond what's already in your store.
 
-The stdio transport is the most secure option: the only thing
-that crosses a process boundary is JSON-RPC messages between
-the host and the server.
+The stdio transport exchanges JSON-RPC messages with the launching host. Clew does not
+authenticate that parent process, so configure only clients you trust. MCP resource and
+tool return types are exercised against the public Python MCP client in the test suite.
 
 ## See also
 
-- [OpenTelemetry integration](otel.md) — the OTel bridge works
-  with MCP-exposed traces
+- [OTel-shaped NDJSON](otel.md) — import/export projection
 - [Tracing reference](../reference/protocol.md) — full schema

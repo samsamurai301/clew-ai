@@ -9,15 +9,14 @@ them with:
 or skip them when running the regular suite (they're marked with
 ``@pytest.mark.e2e``).
 """
+
 from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
-import time
 from pathlib import Path
 
 import pytest
@@ -30,23 +29,25 @@ def _venv_with_clew() -> Path:
     """
     # Auto-discover the latest built wheel.
     dist_dir = Path(__file__).resolve().parent.parent / "dist"
-    wheels = sorted(dist_dir.glob("clew-*.whl"))
+    wheels = sorted(dist_dir.glob("clew_ai-*.whl"))
     if not wheels:
         # Build it
         subprocess.run(["uv", "build"], cwd=dist_dir.parent, check=True, capture_output=True)
-        wheels = sorted(dist_dir.glob("clew-*.whl"))
+        wheels = sorted(dist_dir.glob("clew_ai-*.whl"))
     if not wheels:
-        raise RuntimeError("no clew wheel found in dist/; run `uv build` first")
+        raise RuntimeError("no clew-ai wheel found in dist/; run `uv build` first")
     wheel: Path = wheels[-1]  # latest (always defined after the if-guard)
     venv = Path(tempfile.mkdtemp(prefix=f"clew_e2e_{wheel.name}_"))
     subprocess.run(
         [sys.executable, "-m", "venv", str(venv)],
-        check=True, capture_output=True,
+        check=True,
+        capture_output=True,
     )
     py = venv / "bin" / "python"
     subprocess.run(
         [str(py), "-m", "pip", "install", "--quiet", str(wheel), "mcp"],
-        check=True, capture_output=True,
+        check=True,
+        capture_output=True,
     )
     return py
 
@@ -81,7 +82,9 @@ def _record(clew_python: Path, cwd: Path, prompt: str) -> str:
     )
     r = subprocess.run(
         [str(clew_python), "-c", code],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True,
+        text=True,
+        timeout=30,
     )
     assert r.returncode == 0, r.stderr
 
@@ -162,14 +165,24 @@ def test_e2e_keygen_share_verify(clew_python: Path, tmp_path: Path) -> None:
 
     key = tmp_path / "k.pem"
     pub = tmp_path / "k.pub"
-    assert _run(clew_python, "keygen", "--out", str(key), "--public-out", str(pub), cwd=tmp_path).returncode == 0
+    assert (
+        _run(
+            clew_python, "keygen", "--out", str(key), "--public-out", str(pub), cwd=tmp_path
+        ).returncode
+        == 0
+    )
     # Private key is 0o600, public is 0o644
     if sys.platform != "win32":
         assert oct(key.stat().st_mode & 0o777) == "0o600"
         assert oct(pub.stat().st_mode & 0o777) == "0o644"
 
     bundle = tmp_path / "b.tgz"
-    assert _run(clew_python, "share", tid, "--key", str(key), "--out", str(bundle), cwd=tmp_path).returncode == 0
+    assert (
+        _run(
+            clew_python, "share", tid, "--key", str(key), "--out", str(bundle), cwd=tmp_path
+        ).returncode
+        == 0
+    )
     assert bundle.exists()
 
     r = _run(clew_python, "verify", str(bundle), "--public-key", str(pub))
@@ -184,8 +197,11 @@ def test_e2e_branch_checkout_replay_diff(clew_python: Path, tmp_path: Path) -> N
     _record(clew_python, tmp_path, "a")
     r = _run(clew_python, "log", "--json", cwd=tmp_path)
     tid = json.loads(r.stdout.splitlines()[0])["trace_id"]
+    shown = _run(clew_python, "show", tid, "--json", cwd=tmp_path)
+    assert shown.returncode == 0
+    root_span_id = json.loads(shown.stdout.splitlines()[0])["id"]
 
-    assert _run(clew_python, "branch", "exp", "--root", tid, cwd=tmp_path).returncode == 0
+    assert _run(clew_python, "branch", "exp", root_span_id, cwd=tmp_path).returncode == 0
     r = _run(clew_python, "branches", cwd=tmp_path)
     assert "exp" in r.stdout
 
@@ -239,7 +255,9 @@ def test_e2e_trace_clean_env(clew_python: Path, tmp_path: Path) -> None:
         [str(clew_python.parent / "clew"), "trace", "--clean-env", "--", "python3", "-c", code],
         cwd=tmp_path,
         env=env,
-        capture_output=True, text=True, timeout=30,
+        capture_output=True,
+        text=True,
+        timeout=30,
     )
     # The python3 -c output is in the span, not in stdout. Check the trace.
     assert r.returncode == 0, r.stderr
@@ -276,45 +294,79 @@ def test_e2e_mcp_stdio_roundtrip(clew_python: Path, tmp_path: Path) -> None:
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
-        text=True, bufsize=1,
+        text=True,
+        bufsize=1,
     )
     try:
+
         def call(req, timeout=5):
             proc.stdin.write(json.dumps(req) + "\n")
             proc.stdin.flush()
             return json.loads(proc.stdout.readline())
 
-        r = call({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
-            "protocolVersion": "2024-11-05", "capabilities": {},
-            "clientInfo": {"name": "test", "version": "0.1"},
-        }})
-        assert r and r.get("result"), r
+        r = call(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": {"name": "test", "version": "0.1"},
+                },
+            }
+        )
+        assert r, r
+        assert r.get("result"), r
         assert r["result"]["serverInfo"]["name"] == "clew"
 
-        proc.stdin.write(json.dumps({
-            "jsonrpc": "2.0", "method": "notifications/initialized"
-        }) + "\n")
+        proc.stdin.write(
+            json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n"
+        )
         proc.stdin.flush()
 
         r = call({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
         tools = r["result"]["tools"]
         assert len(tools) == 12
 
-        r = call({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {
-            "name": "list_traces", "arguments": {"root": str(tmp_path / ".clew")},
-        }})
+        r = call(
+            {
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {
+                    "name": "list_traces",
+                    "arguments": {"root": str(tmp_path / ".clew")},
+                },
+            }
+        )
         parsed = json.loads(r["result"]["content"][0]["text"])
         assert len(parsed) >= 1
 
-        r = call({"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {
-            "name": "doctor", "arguments": {"root": str(tmp_path / ".clew")},
-        }})
+        r = call(
+            {
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "tools/call",
+                "params": {
+                    "name": "doctor",
+                    "arguments": {"root": str(tmp_path / ".clew")},
+                },
+            }
+        )
         parsed = json.loads(r["result"]["content"][0]["text"])
         assert parsed["healthy"] is True
 
-        r = call({"jsonrpc": "2.0", "id": 5, "method": "resources/read", "params": {
-            "uri": "store://info",
-        }})
+        r = call(
+            {
+                "jsonrpc": "2.0",
+                "id": 5,
+                "method": "resources/read",
+                "params": {
+                    "uri": "store://info",
+                },
+            }
+        )
         parsed = json.loads(r["result"]["contents"][0]["text"])
         assert parsed["branches"] == ["main"]
     finally:
@@ -344,8 +396,10 @@ def test_e2e_otel_roundtrip(clew_python: Path, tmp_path: Path) -> None:
     r = _run(clew_python, "otel-import", str(sample), "--branch", "otel", cwd=tmp_path)
     assert r.returncode == 0
     assert "imported 2/2" in r.stdout
+    imported_trace_id = r.stdout.rsplit("trace_id=", 1)[1].strip()
+    assert imported_trace_id != "otel-test"
 
-    r = _run(clew_python, "show", "--json", "otel-test", cwd=tmp_path)
+    r = _run(clew_python, "show", "--json", imported_trace_id, cwd=tmp_path)
     lines = [json.loads(l) for l in r.stdout.splitlines() if l.strip()]
     by_name = {s["name"]: s for s in lines}
     assert by_name["llm"]["type"] == "LLM"
@@ -368,8 +422,9 @@ def test_e2e_bundle_tamper_detected(clew_python: Path, tmp_path: Path) -> None:
     _run(clew_python, "share", tid, "--key", str(key), "--out", str(bundle), cwd=tmp_path)
 
     # Tamper: change a span's content in the bundle
-    import tarfile
     import io
+    import tarfile
+
     with tarfile.open(bundle, "r:gz") as src:
         members = []
         for m in src.getmembers():
@@ -386,4 +441,5 @@ def test_e2e_bundle_tamper_detected(clew_python: Path, tmp_path: Path) -> None:
     # Verify should now fail
     r = _run(clew_python, "verify", str(bundle), "--public-key", str(pub))
     assert r.returncode != 0
-    assert "tamper" in r.stdout.lower() or "tamper" in r.stderr.lower()
+    assert "record" in r.stderr.lower()
+    assert "verification" in r.stderr.lower()

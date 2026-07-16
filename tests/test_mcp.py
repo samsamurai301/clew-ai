@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
@@ -11,6 +12,44 @@ from clew.core.models import Span, SpanStatus, SpanType
 from clew.core.store import Store
 from clew.core.trace import TraceStore
 from clew.mcp_server import build_server
+
+
+def test_actual_mcp_client_session_roundtrip(tmp_path: Path) -> None:
+    """The public MCP client can initialize, call a tool, and read a resource."""
+    from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
+
+    trace_id = _seed(tmp_path / ".clew")
+
+    async def exercise() -> None:
+        parameters = StdioServerParameters(
+            command=sys.executable,
+            args=["-m", "clew", "mcp"],
+            cwd=tmp_path,
+        )
+        async with stdio_client(parameters) as (read_stream, write_stream):
+            async with ClientSession(read_stream, write_stream) as session:
+                initialized = await session.initialize()
+                assert initialized.serverInfo.name == "clew"
+
+                tools = await session.list_tools()
+                assert "get_trace" in {tool.name for tool in tools.tools}
+
+                result = await session.call_tool(
+                    "get_trace",
+                    {"trace_id": trace_id, "root": str(tmp_path / ".clew")},
+                )
+                assert result.isError is False
+                payload = json.loads(result.content[0].text)  # type: ignore[union-attr]
+                assert payload["trace_id"] == trace_id
+
+                resource = await session.read_resource("store://info")
+                info = json.loads(resource.contents[0].text)  # type: ignore[union-attr]
+                assert info["version"] == 2
+
+    import asyncio
+
+    asyncio.run(exercise())
 
 
 def _make_span(
@@ -22,16 +61,19 @@ def _make_span(
     status: SpanStatus = SpanStatus.OK,
     error: str | None = None,
     metadata: dict[str, object] | None = None,
+    sequence: int = 0,
+    output: object = "y",
 ) -> Span:
     return Span(
         id=uuid4().hex,
         trace_id=trace_id,
         parent_ids=parent_ids or [],
+        sequence=sequence,
         type=type,
         name=name,
         attributes={},
         input="x",
-        output="y",
+        output=output,
         started_at=datetime(2024, 1, 1, tzinfo=UTC),
         ended_at=datetime(2024, 1, 2, tzinfo=UTC),
         status=status,
@@ -45,11 +87,17 @@ def _seed(root: Path) -> str:
     store = Store(root)
     ts = TraceStore(store)
     tid = uuid4().hex
+    root_span = _make_span(tid, name="agent")
     spans = [
-        _make_span(tid, name="agent"),
-        _make_span(tid, parent_ids=[], name="llm-call", type=SpanType.LLM),
+        root_span,
+        _make_span(
+            tid,
+            parent_ids=[root_span.id],
+            sequence=1,
+            name="llm-call",
+            type=SpanType.LLM,
+        ),
     ]
-    spans[1] = spans[1].model_copy(update={"parent_ids": [spans[0].id]})
     for s in spans:
         ts.add_span(s)
     from clew.core.branch import BranchManager
@@ -86,9 +134,7 @@ def _call(server, name: str, arguments: dict) -> list:
     from mcp.types import CallToolRequest, CallToolRequestParams
 
     handler = server.request_handlers[CallToolRequest]
-    req = CallToolRequest(
-        params=CallToolRequestParams(name=name, arguments=arguments)
-    )
+    req = CallToolRequest(params=CallToolRequestParams(name=name, arguments=arguments))
     result = asyncio.run(handler(req))
     return result.root.content
 
@@ -202,9 +248,7 @@ def test_show_branch(tmp_path: Path) -> None:
 def test_create_branch_and_checkout(tmp_path: Path) -> None:
     tid = _seed(tmp_path / ".clew")
     store = Store(tmp_path / ".clew")
-    root_span_id = next(
-        s.id for s in store.iter_spans(tid) if not s.parent_ids
-    )
+    root_span_id = next(s.id for s in store.iter_spans(tid) if not s.parent_ids)
     out = _call(
         build_server(),
         "create_branch",
@@ -261,24 +305,39 @@ def test_diff_traces_tool(tmp_path: Path) -> None:
     """``diff_traces`` returns a JSON diff with same key shape."""
     from clew.core.branch import BranchManager
     from clew.core.trace import TraceStore
+
     store = Store(tmp_path / ".clew")
     ts = TraceStore(store)
     bm = BranchManager(ts)
     # Two traces
     tid_a = uuid4().hex
+    root_a = _make_span(tid_a, name="a1")
     spans_a = [
-        _make_span(tid_a, name="a1"),
-        _make_span(tid_a, parent_ids=[], name="a2", type=SpanType.LLM),
+        root_a,
+        _make_span(
+            tid_a,
+            parent_ids=[root_a.id],
+            sequence=1,
+            name="a2",
+            type=SpanType.LLM,
+            output="out-A",
+        ),
     ]
-    spans_a[1] = spans_a[1].model_copy(update={"parent_ids": [spans_a[0].id], "output": "out-A"})
     for s in spans_a:
         ts.add_span(s)
     tid_b = uuid4().hex
+    root_b = _make_span(tid_b, name="a1")
     spans_b = [
-        _make_span(tid_b, name="a1"),
-        _make_span(tid_b, parent_ids=[], name="a2", type=SpanType.LLM),
+        root_b,
+        _make_span(
+            tid_b,
+            parent_ids=[root_b.id],
+            sequence=1,
+            name="a2",
+            type=SpanType.LLM,
+            output="out-B",
+        ),
     ]
-    spans_b[1] = spans_b[1].model_copy(update={"parent_ids": [spans_b[0].id], "output": "out-B"})
     for s in spans_b:
         ts.add_span(s)
     bm.move("main", spans_a[0].id)
@@ -311,6 +370,7 @@ def test_create_branch_defaults_to_head(tmp_path: Path) -> None:
     """``create_branch`` without ``from_span`` uses current HEAD."""
     from clew.core.branch import BranchManager
     from clew.core.trace import TraceStore
+
     _seed(tmp_path / ".clew")
     out = _call(
         build_server(),
@@ -324,7 +384,7 @@ def test_create_branch_defaults_to_head(tmp_path: Path) -> None:
     assert bm.get("auto").head_span_id == bm.get("main").head_span_id
 
 
-def test_show_branch_HEAD_alias(tmp_path: Path) -> None:
+def test_show_branch_head_alias(tmp_path: Path) -> None:
     """``show_branch`` accepts the literal name ``HEAD``."""
     _seed(tmp_path / ".clew")
     out = _call(
@@ -340,11 +400,12 @@ def test_show_branch_HEAD_alias(tmp_path: Path) -> None:
 def test_search_with_metadata_filter(tmp_path: Path) -> None:
     """``search`` accepts a ``metadata`` dict and filters by it."""
     from clew.core.trace import TraceStore
+
     store = Store(tmp_path / ".clew")
     ts = TraceStore(store)
     tid = uuid4().hex
     s_with = _make_span(tid, name="with-meta", metadata={"model": "gpt-4o"})
-    s_without = _make_span(tid, parent_ids=[s_with.id], name="without-meta")
+    s_without = _make_span(tid, parent_ids=[s_with.id], sequence=1, name="without-meta")
     ts.add_span(s_with)
     ts.add_span(s_without)
     out = _call(
@@ -361,11 +422,18 @@ def test_search_with_metadata_filter(tmp_path: Path) -> None:
 def test_query_with_metadata_specs(tmp_path: Path) -> None:
     """``query`` accepts ``metadata_specs`` (k=v CLI form) and filters."""
     from clew.core.trace import TraceStore
+
     store = Store(tmp_path / ".clew")
     ts = TraceStore(store)
     tid = uuid4().hex
     s1 = _make_span(tid, name="a", metadata={"temperature": 0.7})
-    s2 = _make_span(tid, parent_ids=[s1.id], name="b", metadata={"temperature": 0.3})
+    s2 = _make_span(
+        tid,
+        parent_ids=[s1.id],
+        sequence=1,
+        name="b",
+        metadata={"temperature": 0.3},
+    )
     ts.add_span(s1)
     ts.add_span(s2)
     out = _call(
@@ -463,7 +531,9 @@ def test_read_resource_store_info(tmp_path: Path, monkeypatch) -> None:
     resource's ``_open(None)`` finds the freshly-initialised store.
     """
     import asyncio
+
     from mcp.types import ReadResourceRequest, ReadResourceRequestParams
+
     _seed(tmp_path / ".clew")
     monkeypatch.chdir(tmp_path)
     server = build_server()
@@ -488,7 +558,9 @@ def test_read_resource_trace(tmp_path: Path, monkeypatch) -> None:
     finds the right store.
     """
     import asyncio
+
     from mcp.types import ReadResourceRequest, ReadResourceRequestParams
+
     tid = _seed(tmp_path / ".clew")
     monkeypatch.chdir(tmp_path)
     server = build_server()

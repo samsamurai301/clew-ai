@@ -1,91 +1,60 @@
-# Bundle format (v1)
+# Signed bundle format v2
 
-A clew bundle is a portable tar.gz containing a single signed
-trace. The format is stable; bundles created by any 1.x.y
-release of clew can be read by any later 1.x.y release.
+A Clew bundle is a gzip-compressed tar archive containing one trace:
 
-## Layout
-
-```
-manifest.json   # bundle metadata (see below)
-sig             # 64-byte Ed25519 signature over manifest.json
-spans/<id>.json # one JSON file per span
+```text
+manifest.json
+sig
+spans/<32-hex-span-id>.json
+...
 ```
 
-The `sig` and `spans/` are at the top level (not inside a
-versioned subdirectory). clew 1.x.y always reads the layout
-above; if we ever change it, the bundle's `version` field
-will bump and the on-disk layout will diverge.
+Only bundle version 2 is accepted by Clew 1.1.5.
 
-## manifest.json
+## Manifest
+
+The canonical JSON manifest declares at least:
 
 ```json
 {
   "format": "clew-bundle",
-  "version": 1,
-  "created_at": "2024-01-01T00:00:00.000+00:00",
-  "trace_id": "...",
-  "root_span_id": "...",
-  "span_count": 4,
-  "spans_sha256": "<hex>",
-  "source_store": "/path/to/.clew",
-  "public_key": "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n"
+  "version": 2,
+  "trace_id": "32 lowercase hexadecimal characters",
+  "root_span_id": "32 lowercase hexadecimal characters",
+  "span_count": 3,
+  "spans_sha256": "64 lowercase hexadecimal characters"
 }
 ```
 
-| Field | Type | Required | Description |
-|---|---|---|---|
-| `format` | string | yes | Always `clew-bundle`. |
-| `version` | integer | yes | Bundle format version. Currently 1. |
-| `created_at` | string | yes | RFC 3339 UTC timestamp of bundle creation. |
-| `trace_id` | string | yes | The id of the trace this bundle contains. |
-| `root_span_id` | string | yes | The id of the trace's root span. |
-| `span_count` | integer | yes | Number of spans in the bundle. |
-| `spans_sha256` | string | yes | SHA-256 over all span bytes, in order. |
-| `source_store` | string | no | Path to the source store (informational). |
-| `public_key` | string | yes | PEM-encoded Ed25519 public key. |
+`spans_sha256` binds the sorted member ID and exact JSON bytes for every span. Each JSON
+record also verifies its own `content_hash`. `sig` is the Ed25519 signature over the exact
+manifest bytes.
 
-## Signature
+Verification bounds the entire decompressed tar stream before parsing, then checks the
+member allowlist and payload/count limits before signature work, verifies
+the signature, validates the v2 manifest, binds every member byte, validates each `Span`,
+and checks trace identity, root, unique sequence values, complete parents, and cycles.
 
-The 64-byte `sig` file is an Ed25519 signature over the
-**canonical bytes** of the manifest (UTF-8 JSON, sorted keys,
-2-space indent). The bytes are the *exact* form that gets
-written to disk and that gets read back for verification.
+## Security properties
 
-Signatures are deterministic (Ed25519 has no randomness),
-so the same manifest always produces the same signature.
-This makes the bundle byte-stable for archival purposes.
+A valid bundle demonstrates integrity and possession of the matching signing key. It is
+not encrypted, does not establish a timestamp, and does not map a key to a human identity.
 
-## Verification
+The reader rejects traversal, absolute paths, symlinks, hard links, device files, FIFOs,
+unexpected members, oversized uncompressed content or extension metadata, and excessive
+member counts.
 
-`clew verify <bundle> --public-key <key>` does three checks
-in order:
+## Commands
 
-1. **Ed25519 check**: the signature over the manifest is
-   valid. If this fails, the bundle was tampered with.
-2. **Format check**: the manifest declares `format:
-   clew-bundle`. If this fails, the file is not a clew
-   bundle at all (perhaps it's a different tool's format).
-3. **Content check**: the SHA-256 of all span bytes matches
-   `spans_sha256` in the manifest. If this fails, the spans
-   were modified after the bundle was signed.
+```bash
+clew keygen --out signing-key.pem
+clew share TRACE --key signing-key.pem --out trace.tgz
+clew verify trace.tgz --public-key signing-key.pub
+clew import trace.tgz --public-key signing-key.pub
+```
 
-If any check fails, `clew verify` exits 1 and prints the
-specific reason.
-
-## What is NOT in the bundle
-
-- **Refs.** A bundle is a single trace. Refs (branch
-  pointers) are not bundled; on import, you specify a
-  branch name to create.
-- **The SQLite index.** The bundle contains the raw span
-  files. The index is rebuilt on the recipient's machine.
-- **Other traces.** A bundle is a single trace; you can't
-  bundle a branch with multiple traces. Run `clew share`
-  once per trace.
-
-## See also
-
-- [Architecture](architecture.md) — the local store layout
-- [Sharing](../user-guide/sharing.md) — the user-facing
-  command
+Import never overwrites a conflicting record. An exact existing record is idempotent; the
+same ID with different content fails explicitly. The CLI persists the exact in-memory
+span objects produced during signature verification; it does not reopen the pathname
+between verification and persistence. The low-level `extract_spans` helper applies archive
+safety checks but does not authenticate a signature by itself.

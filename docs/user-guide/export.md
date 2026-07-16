@@ -65,4 +65,4 @@ CDN, no analytics.
 
 - [Sharing](sharing.md)
 - [OTel integration](../integrations/otel.md)
-- [CLI reference: show](../reference/cli.md#clew-show)
+- [CLI: inspect traces](cli.md#inspect)

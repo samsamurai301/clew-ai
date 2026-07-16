@@ -98,5 +98,5 @@ even if the stored value is a string `"3"` (and vice versa).
 
 ## See also
 
-- [CLI reference: query](../reference/cli.md#clew-query)
+- [CLI: inspect and query](cli.md#inspect)
 - [Doctor & GC](doctor.md) — find *problems*, not spans

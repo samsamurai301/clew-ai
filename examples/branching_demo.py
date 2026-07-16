@@ -1,7 +1,8 @@
-"""Branching demo: run an agent twice with different params, diff the traces.
+"""Branching demo: replay one trace with a different model and diff it.
 
-This is the killer-feature demo: a single recorded trace, branched
-at a mid-trace span, replayed under a new model, then diffed.
+This is an offline example of Clew's core what-if workflow: record one
+trace, replay it through a constrained executor, move a branch ref to the
+new trace, and compare the two executions.
 
 Run with:
 
@@ -19,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from clew.core.branch import BranchManager
 from clew.core.diff import diff, format_text
 from clew.core.replay import ReplayEngine
-from clew.sdk import SpanType, Tracer
+from clew.sdk import ReplayContext, ReplayResult, Span, SpanType, Tracer
 
 t = Tracer(cwd=Path.cwd())
 bm = BranchManager(t.store)
@@ -43,10 +44,17 @@ async def _replay_with_model(trace_id: str, branch_name: str, new_model: str) ->
     from clew.core.replay import RecordingExecutor
 
     def make_executor(model: str) -> RecordingExecutor:
-        async def fn(span, ctx):  # type: ignore[no-untyped-def]
-            args = (span.input or {}).get('args') or ['']
-            output = f"[{model}] {args[0] if args else ''}"
-            return output, {"replay.model": model}
+        async def fn(span: Span, ctx: ReplayContext) -> ReplayResult:
+            del ctx
+            if span.name != "answer":
+                return ReplayResult(output=span.output)
+            plan = ((span.input or {}).get("args") or [{}])[0]
+            query = plan.get("query", "") if isinstance(plan, dict) else ""
+            return ReplayResult(
+                output=f"[{model}] {query}",
+                attributes={"replay.model": model},
+            )
+
         return RecordingExecutor(fn)
 
     engine = ReplayEngine(t.store, executor=make_executor(new_model))

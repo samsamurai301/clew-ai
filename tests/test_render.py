@@ -7,7 +7,14 @@ from uuid import uuid4
 
 from clew.core.diff import diff as diff_traces
 from clew.core.models import Span, SpanStatus, SpanType, Trace
-from clew.ui.render import _span_label, render_diff, render_log, render_span_tree
+from clew.ui.render import (
+    _span_label,
+    _terminal_safe,
+    render_diff,
+    render_log,
+    render_span_tree,
+)
+from clew.ui.tui import _span_details, _span_tree_label
 
 
 def _span(
@@ -22,6 +29,7 @@ def _span(
         id=uuid4().hex,
         trace_id=trace_id,
         parent_ids=parent_ids or [],
+        sequence=1 if parent_ids else 0,
         type=type,
         name=name,
         attributes={},
@@ -85,3 +93,49 @@ def test_span_label_no_error_text_when_ok() -> None:
     text = label.plain
     assert "ok-span" in text
     assert "ERROR" not in text
+
+
+def test_terminal_safe_escapes_controls_and_bidi_markers() -> None:
+    value = "safe\x1b]52;c;payload\x07\u202eend"
+    rendered = _terminal_safe(value)
+    assert "\x1b" not in rendered
+    assert "\x07" not in rendered
+    assert "\u202e" not in rendered
+    assert "\\x1b" in rendered
+    assert "\\u202e" in rendered
+
+
+def test_renderers_treat_untrusted_names_as_literal_text() -> None:
+    malicious = "[link=https://example.invalid]click[/link]\x1b]52;c;payload\x07"
+    trace_id = uuid4().hex
+    root = _span(trace_id, malicious)
+    trace = Trace(trace_id=trace_id, root_span_id=root.id, spans=[root])
+    tree = render_span_tree(trace)
+    label = tree.children[0].label
+    assert isinstance(label, type(_span_label(root)))
+    assert malicious not in label.plain
+    assert "\\x1b" in label.plain
+
+    table = render_log(
+        [
+            {
+                "trace_id": trace_id,
+                "root_name": malicious,
+                "span_count": 1,
+                "started_at": "now",
+            }
+        ]
+    )
+    assert table.row_count == 1
+
+
+def test_tui_labels_and_details_are_literal_and_control_safe() -> None:
+    malicious = "[bold]forged[/bold]\x1b]52;c;payload\x07"
+    span = _span(uuid4().hex, malicious)
+    label = _span_tree_label(span)
+    details = _span_details(span)
+    assert "[bold]forged[/bold]" in label.plain
+    assert "\x1b" not in label.plain
+    assert "\\x1b" in label.plain
+    assert "[bold]forged[/bold]" in details.plain
+    assert "\x1b" not in details.plain

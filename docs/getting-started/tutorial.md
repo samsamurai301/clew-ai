@@ -1,6 +1,6 @@
 # Tutorial: branch a reasoning trace
 
-This tutorial walks through the killer clew workflow: you ran an
+This tutorial walks through Clew's core what-if workflow: you ran an
 agent, the answer wasn't great, you want to try a different model
 and see what would have happened.
 
@@ -12,7 +12,7 @@ stub — so the tutorial runs offline and is fully reproducible.
 
 ```bash
 uv venv && source .venv/bin/activate
-uv add clew
+uv add clew-ai
 mkdir clew-demo && cd clew-demo
 clew init .
 ```
@@ -71,7 +71,7 @@ clew show <trace_id>
 ```
 
 Replace `<trace_id>` with the one from `clew log` (or use
-`--root .` to scope the lookup).
+`--root .clew` to select the store explicitly).
 
 ## 4. Branch: try a different answer
 

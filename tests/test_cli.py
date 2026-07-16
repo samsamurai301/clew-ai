@@ -44,6 +44,53 @@ def test_help() -> None:
     assert "replay" in result.stdout
 
 
+def test_demo_runs_complete_offline_workflow(in_tmp: Path) -> None:
+    """The launch demo creates failure/replay traces, a branch, diff, and HTML."""
+    report = in_tmp / "demo.html"
+    result = runner.invoke(
+        app,
+        ["demo", "--root", str(in_tmp / ".clew"), "--report", str(report)],
+    )
+    assert result.exit_code == 0, result.stdout
+    assert "Clew offline demo complete" in result.stdout
+    assert "failed trace" in result.stdout
+    assert "replay trace" in result.stdout
+    assert report.is_file()
+
+    from clew.core.branch import BranchManager
+    from clew.core.store import Store
+    from clew.core.trace import TraceStore
+
+    trace_store = TraceStore(Store(in_tmp / ".clew"))
+    traces = [trace_store.get_trace(trace_id) for trace_id in trace_store.store.iter_traces()]
+    assert len(traces) == 2
+    assert any(span.status is SpanStatus.ERROR for trace in traces for span in trace.spans)
+    assert any(
+        branch.name.startswith("demo-fixed-") for branch in BranchManager(trace_store).list()
+    )
+
+
+def test_demo_honors_new_explicit_store_path(in_tmp: Path) -> None:
+    """An absent explicit --root is initialized directly, never as .clew/.clew."""
+    store_path = in_tmp / "custom-store"
+    report = in_tmp / "demo.html"
+    result = runner.invoke(
+        app,
+        ["demo", "--root", str(store_path), "--report", str(report)],
+    )
+    assert result.exit_code == 0, result.stdout
+    assert (store_path / "manifest.json").is_file()
+    assert not (store_path / ".clew").exists()
+
+
+def test_read_only_command_does_not_create_store(in_tmp: Path) -> None:
+    """Discovery returns a path but log does not initialize it as a side effect."""
+    missing = in_tmp / ".clew"
+    result = runner.invoke(app, ["log"], catch_exceptions=False)
+    assert result.exit_code == 1
+    assert not missing.exists()
+
+
 def test_init_creates_clew_dir(in_tmp: Path) -> None:
     """``clew init`` creates ``.clew/`` and a manifest.json."""
     result = runner.invoke(app, ["init", str(in_tmp)])
@@ -57,6 +104,31 @@ def test_init_is_idempotent(in_tmp: Path) -> None:
     runner.invoke(app, ["init", str(in_tmp)])
     result = runner.invoke(app, ["init", str(in_tmp)])
     assert result.exit_code == 0
+
+
+def test_trace_propagates_child_failure_after_persisting(in_tmp: Path) -> None:
+    """CI sees the child failure and still receives a diagnostic span id."""
+    runner.invoke(app, ["init", str(in_tmp)])
+    result = runner.invoke(
+        app,
+        [
+            "trace",
+            "--root",
+            str(in_tmp / ".clew"),
+            "--",
+            sys.executable,
+            "-c",
+            "raise SystemExit(7)",
+        ],
+    )
+    assert result.exit_code == 7
+    span_id = result.stdout.strip().splitlines()[-1]
+
+    from clew.core.store import Store
+
+    span = Store(in_tmp / ".clew").get(span_id)
+    assert span.status is SpanStatus.ERROR
+    assert span.attributes["returncode"] == 7
 
 
 def test_log_empty(in_tmp: Path) -> None:
@@ -129,6 +201,7 @@ def test_branch_create_and_list(in_tmp: Path) -> None:
     ts.add_span(span)
     # Move main to point at our root, then create a new branch.
     from clew.core.branch import BranchManager
+
     bm = BranchManager(ts)
     bm.move("main", span.id)
     result = runner.invoke(app, ["branch", "feature-y", span.id, "--root", str(in_tmp / ".clew")])
@@ -212,6 +285,7 @@ def test_share_creates_signed_tarball(in_tmp: Path) -> None:
     assert out_path.exists()
     # Inspect the tarball.
     import tarfile
+
     with tarfile.open(out_path, "r:gz") as tar:
         names = tar.getnames()
     assert "manifest.json" in names
@@ -219,9 +293,7 @@ def test_share_creates_signed_tarball(in_tmp: Path) -> None:
     # Verify the signature with the matching public key.
     pub_path = in_tmp / "pub.pem"
     pub_path.write_bytes(pub_pem)
-    v = runner.invoke(
-        app, ["verify", str(out_path), "--public-key", str(pub_path)]
-    )
+    v = runner.invoke(app, ["verify", str(out_path), "--public-key", str(pub_path)])
     assert v.exit_code == 0, v.stdout
 
 
@@ -234,6 +306,7 @@ def test_keygen_creates_keypair(in_tmp: Path) -> None:
     assert priv.with_suffix(priv.suffix + ".pub").exists()
     # Should be parseable as a keypair.
     from clew.core.bundle import load_private_key, load_public_key
+
     p = load_private_key(priv)
     pub = p.public_key()
     loaded = load_public_key(priv.with_suffix(priv.suffix + ".pub"))
@@ -292,9 +365,7 @@ def test_verify_rejects_tampered_bundle(in_tmp: Path) -> None:
     )
     # Tamper with the manifest.
     tampered = in_tmp / "b_tampered.tgz"
-    with tarfile.open(in_tmp / "b.tgz", "r:gz") as src, tarfile.open(
-        tampered, "w:gz"
-    ) as dst:
+    with tarfile.open(in_tmp / "b.tgz", "r:gz") as src, tarfile.open(tampered, "w:gz") as dst:
         for m in src.getmembers():
             if m.name == "manifest.json":
                 f = src.extractfile(m)
@@ -309,9 +380,7 @@ def test_verify_rejects_tampered_bundle(in_tmp: Path) -> None:
                 f = src.extractfile(m)
                 if f is not None:
                     dst.addfile(m, io.BytesIO(f.read()))
-    result = runner.invoke(
-        app, ["verify", str(tampered), "--public-key", str(in_tmp / "pub.pem")]
-    )
+    result = runner.invoke(app, ["verify", str(tampered), "--public-key", str(in_tmp / "pub.pem")])
     assert result.exit_code == 1
 
 
@@ -481,9 +550,7 @@ def test_doctor_clean_store(in_tmp: Path) -> None:
 def test_doctor_json_format(in_tmp: Path) -> None:
     """Doctor --json emits a parseable dict."""
     runner.invoke(app, ["init", str(in_tmp)])
-    result = runner.invoke(
-        app, ["doctor", "--json", "--root", str(in_tmp / ".clew")]
-    )
+    result = runner.invoke(app, ["doctor", "--json", "--root", str(in_tmp / ".clew")])
     assert result.exit_code == 0
     parsed = json.loads(result.stdout)
     assert "healthy" in parsed
@@ -530,8 +597,9 @@ def test_query_lists_all_spans(in_tmp: Path) -> None:
     for i in range(2):
         s = _Span(
             id=_uuid.uuid4().hex,
-            trace_id=tid,
+            trace_id=_uuid.uuid4().hex,
             parent_ids=[],
+            sequence=0,
             type=_Type.OBSERVATION,
             name=f"step-{i}",
             attributes={},
@@ -563,13 +631,13 @@ def test_query_filter_by_name(in_tmp: Path) -> None:
     runner.invoke(app, ["init", str(in_tmp)])
     store = _Store(in_tmp / ".clew")
     ts = _TS(store)
-    tid = _uuid.uuid4().hex
     for name in ("alpha", "beta", "alphabet"):
         ts.add_span(
             _Span(
                 id=_uuid.uuid4().hex,
-                trace_id=tid,
+                trace_id=_uuid.uuid4().hex,
                 parent_ids=[],
+                sequence=0,
                 type=_Type.OBSERVATION,
                 name=name,
                 attributes={},
@@ -580,9 +648,7 @@ def test_query_filter_by_name(in_tmp: Path) -> None:
                 status=_Status.OK,
             )
         )
-    result = runner.invoke(
-        app, ["query", "--name", "alpha", "--root", str(in_tmp / ".clew")]
-    )
+    result = runner.invoke(app, ["query", "--name", "alpha", "--root", str(in_tmp / ".clew")])
     assert result.exit_code == 0
     assert "alpha" in result.stdout
     assert "alphabet" in result.stdout
@@ -610,6 +676,7 @@ def test_query_filter_by_type_and_status(in_tmp: Path) -> None:
             id=_uuid.uuid4().hex,
             trace_id=tid,
             parent_ids=[],
+            sequence=0,
             type=_Type.LLM,
             name="good",
             attributes={},
@@ -622,8 +689,9 @@ def test_query_filter_by_type_and_status(in_tmp: Path) -> None:
     )
     bad = _Span(
         id=_uuid.uuid4().hex,
-        trace_id=tid,
+        trace_id=_uuid.uuid4().hex,
         parent_ids=[],
+        sequence=0,
         type=_Type.TOOL,
         name="bad",
         attributes={},
@@ -694,6 +762,7 @@ def test_query_metadata_filter(in_tmp: Path) -> None:
             id=_uuid.uuid4().hex,
             trace_id=tid,
             parent_ids=[],
+            sequence=0,
             type=_Type.LLM,
             name="gpt4o-call",
             attributes={},
@@ -708,8 +777,9 @@ def test_query_metadata_filter(in_tmp: Path) -> None:
     ts.add_span(
         _Span(
             id=_uuid.uuid4().hex,
-            trace_id=tid,
+            trace_id=_uuid.uuid4().hex,
             parent_ids=[],
+            sequence=0,
             type=_Type.LLM,
             name="claude-call",
             attributes={},
@@ -738,9 +808,7 @@ def test_query_metadata_filter(in_tmp: Path) -> None:
 
 def test_query_no_match_prints_no_matches(in_tmp: Path) -> None:
     runner.invoke(app, ["init", str(in_tmp)])
-    result = runner.invoke(
-        app, ["query", "--name", "nope", "--root", str(in_tmp / ".clew")]
-    )
+    result = runner.invoke(app, ["query", "--name", "nope", "--root", str(in_tmp / ".clew")])
     assert result.exit_code == 0
     assert "no matches" in result.stdout.lower()
 
@@ -776,9 +844,7 @@ def test_query_json(in_tmp: Path) -> None:
             status=_Status.OK,
         )
     )
-    result = runner.invoke(
-        app, ["query", "--json", "--root", str(in_tmp / ".clew")]
-    )
+    result = runner.invoke(app, ["query", "--json", "--root", str(in_tmp / ".clew")])
     assert result.exit_code == 0
     parsed = json.loads(result.stdout)
     assert parsed["count"] == 1
@@ -891,7 +957,7 @@ def test_trace_records_subprocess(in_tmp: Path, monkeypatch: pytest.MonkeyPatch)
     )
     assert result.exit_code == 0, result.stdout
     span_id = result.stdout.strip()
-    assert len(span_id) == 64  # sha256 hex
+    assert len(span_id) == 32  # UUID hex occurrence id
 
 
 def test_trace_rejects_empty_argv(in_tmp: Path) -> None:
@@ -933,9 +999,7 @@ def test_show_json(in_tmp: Path) -> None:
             status=_Status.OK,
         )
     )
-    result = runner.invoke(
-        app, ["show", tid, "--json", "--root", str(in_tmp / ".clew")]
-    )
+    result = runner.invoke(app, ["show", tid, "--json", "--root", str(in_tmp / ".clew")])
     assert result.exit_code == 0
     lines = [ln for ln in result.stdout.splitlines() if ln.startswith("{")]
     assert lines
@@ -945,9 +1009,7 @@ def test_show_json(in_tmp: Path) -> None:
 
 def test_show_missing_trace_fails(in_tmp: Path) -> None:
     runner.invoke(app, ["init", str(in_tmp)])
-    result = runner.invoke(
-        app, ["show", "0" * 64, "--root", str(in_tmp / ".clew")]
-    )
+    result = runner.invoke(app, ["show", "0" * 64, "--root", str(in_tmp / ".clew")])
     assert result.exit_code == 1
 
 
@@ -984,14 +1046,19 @@ def test_trace_clean_env_does_not_leak_secrets(tmp_path: Path, monkeypatch) -> N
     is supplied, the subprocess sees that exact env (not the parent's).
     """
     import os
+
+    from clew.core.models import SpanStatus
     from clew.core.runner import run_and_record
-    from clew.core.models import Span, SpanStatus, SpanType
     from clew.core.store import Store
 
     monkeypatch.setenv("CLEW_TEST_SECRET", "hunter2")
     store = Store(tmp_path / ".clew")
     span = run_and_record(
-        ["python3", "-c", "import os, sys; sys.exit(0 if 'CLEW_TEST_SECRET' not in os.environ else 1)"],
+        [
+            "python3",
+            "-c",
+            "import os, sys; sys.exit(0 if 'CLEW_TEST_SECRET' not in os.environ else 1)",
+        ],
         cwd=tmp_path,
         store=store,
         env={"PATH": os.environ.get("PATH", "")},

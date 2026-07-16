@@ -1,131 +1,64 @@
-# Migrating from 0.1.0 to 1.0.0
+# Compatibility notice: v1 to v2
 
-This guide covers the differences between `clew 0.1.0` (the MVP
-release) and `clew 1.0.0` (the first stable release). The on-disk
-store format is unchanged; you can open a 0.1.0 store in 1.0.0
-without any migration. Only the CLI surface and a few Python API
-behaviors have changed.
+Clew 1.1.5 is a breaking corrective release. Store format v2 and bundle format v2 are
+the only persisted formats it supports.
 
-## Python SDK
+## Why there is no automatic migration
 
-### The async agent bug
+The v1 identity contract could collapse separate executions onto the same span ID. That
+means a generic converter cannot always reconstruct which occurrence, output, ordering,
+or parent relationship was intended. Silently guessing would turn ambiguous data into
+apparently trustworthy data.
 
-In 0.1.0, the async agent path was broken: an `@t.agent` over an
-`async def` would await `None` (the partial result of
-`_run_as_agent` before the function was called), causing a
-`TypeError: object NoneType can't be used in 'await' expression`.
+Clew therefore detects v1 stores and raises `UnsupportedStoreVersion` before creating a
+lock, index, ref, or replacement record. It never deletes, edits, or upgrades the old
+directory automatically.
 
-In 1.0.0, the agent has two distinct code paths:
+## Start a v2 store safely
 
-```python
-@t.agent
-def run_sync(x): ...       # uses _run_sync_agent
-
-@t.agent
-async def run_async(x): ...  # uses _run_async_agent (new in 1.0.0)
-```
-
-If your 0.1.0 code was wrapped in `try/except` to work around the
-bug, the workaround is no longer needed. The async path now
-returns the function's actual return value.
-
-### Generator span support (new in 1.0.0)
-
-If you were iterating a generator manually inside a `@t.span`,
-1.0.0 will do it for you:
-
-```python
-# 0.1.0
-@t.span("stream")
-def consume():
-    items = []
-    for x in generate():
-        items.append(x)
-        # no per-item tracing
-    return items
-
-# 1.0.0 — span starts on first iteration, ends on exhaustion
-@t.span("stream")
-def stream():
-    for x in generate():
-        yield x  # each yield is captured as stream.item-N
-```
-
-The same works for `async def` + `yield` (async generators).
-
-## CLI
-
-### `clew share` now requires `--key`
-
-The 0.1.0 release exported unsigned tarballs. The 1.0.0 release
-generates real Ed25519 signatures, which requires a private key.
+From the project directory:
 
 ```bash
-# 0.1.0
-clew share <trace_id> --out bundle.tgz
-
-# 1.0.0
-clew keygen --out clew-key.pem
-clew share <trace_id> --key clew-key.pem --out bundle.tgz
+mv .clew .clew-v1-archive
+clew init
+clew doctor
 ```
 
-The private key is written unencrypted (mode 0600). Treat it
-like a password: keep it out of git, store it in your password
-manager.
+Keep the archive until you no longer need the original evidence. Do not copy v1 span
+files into the new store.
 
-### New commands
+## Contract changes
 
-| Command                  | What it does                                    |
-| ------------------------ | ----------------------------------------------- |
-| `clew keygen`            | Generate an Ed25519 keypair (private + public)  |
-| `clew verify`            | Verify a signed bundle                          |
-| `clew import`            | Verify + import a signed bundle                 |
-| `clew doctor`            | Check store health (read-only)                  |
-| `clew gc`                | Remove orphan span files (`--dry-run` supported) |
-| `clew query`             | Search spans by name/type/status/metadata       |
-| `clew export`            | Write a trace to OTel NDJSON                    |
-| `clew otel-import`       | Read OTel NDJSON into the store                 |
-| `clew trace -- <cmd>`    | Run a subprocess as a single span               |
+| Area | v1 behavior | v2 behavior |
+| --- | --- | --- |
+| Span identity | Derived/collision-prone | Independent UUID4 occurrence ID |
+| Trace identity | Could be coupled to content | Independent UUID4 per execution |
+| Integrity | Partial content-style digest | SHA-256 over every persisted field except the hash |
+| Record file | One-line `.jsonl` | Canonical `.json` |
+| Ordering | Timestamp/insertion assumptions | Unique `sequence` per trace |
+| Persisted status | Could expose `RUNNING` | Final `OK`, `ERROR`, or `SKIPPED` only |
+| Replay return | Executor could construct spans | Executor returns constrained `ReplayResult` |
+| Partial replay | Incomplete parent rewriting | Ancestors cloned and all parents rewritten |
+| Bundle | v1 | v2 only |
 
-### OTel NDJSON vs signed bundles
+## Version 1.1.4
 
-`clew 1.0.0` has two ways to move traces between machines:
+Version 1.1.4 is treated as an unsafe launch artifact because of trace-collision behavior
+and incorrect public project links. The existing `v1.1.4` Git tag remains historical and
+must not be moved or recreated. Its tagged source is documented as not reproducing the
+manually uploaded package artifact. The PyPI release should be yanked, not deleted.
 
-- **`clew share` / `clew import`** — signed, cryptographic
-  integrity, content-addressed. The "send your agent's trace to
-  a teammate" workflow.
-- **`clew export` / `clew otel-import`** — unsigned, OTel-shaped
-  NDJSON, one file per trace. The "send your trace to an OTel
-  collector" or "import a trace from an OTel-instrumented
-  agent" workflow.
+## Python API updates
 
-Use `share` for trusted handoffs within a team. Use `export` for
-interop with the wider OTel ecosystem.
+Replay callables now accept a finalized source `Span` and `ReplayContext`, then return a
+`ReplayResult` synchronously or asynchronously:
 
-## On-disk store
+```python
+from clew.sdk import ReplayContext, ReplayResult, Span
 
-No changes. A 0.1.0 store opens cleanly in 1.0.0. New stores
-created in 1.0.0 have a placeholder `refs/main` (64 zeros) so
-the doctor doesn't flag a fresh store as having a dangling HEAD;
-this file is overwritten the first time you move `main` onto a
-real span.
+def execute(span: Span, context: ReplayContext) -> ReplayResult:
+    return ReplayResult(output={"name": span.name, "parents": len(context.parent_chain)})
+```
 
-## Timeline of changes
-
-- **0.1.0**: MVP, unsigned bundles, broken async agent
-- **0.2.0** (skipped; we went straight to 1.0.0)
-- **1.0.0**: signed bundles, working async, generator support,
-  doctor/gc/query/export/import/trace, Ed25519, real docs
-
-## What didn't change
-
-- `Span`, `Trace`, `Branch`, `Ref` model classes — same fields,
-  same validators, same JSON shape.
-- `@t.agent` and `@t.span` decorator signatures — backward
-  compatible.
-- The store layout (`spans/`, `refs/`, `HEAD`, `index.sqlite`,
-  `manifest.json`) — bit-for-bit the same.
-- The OTel mapping (`gen_ai.*` attributes, status codes,
-  millisecond precision) — same as 0.1.0.
-- The replay engine's mock + recording executors — same protocol.
-- The diff engine's path-based matching — same algorithm.
+The public `Span` is immutable and finalized. In-flight mutable state is internal to the
+tracer and is never written to disk.

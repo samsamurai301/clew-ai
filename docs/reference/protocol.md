@@ -1,139 +1,79 @@
-# Protocol
+# Persisted protocol v2
 
-The clew protocol defines the file formats, bundle format, and
-store layout that every clew implementation must agree on. This
-page is the canonical reference; if anything else disagrees with
-this page, this page is right.
+This page describes the only store and bundle formats supported by Clew 1.1.5.
 
-## On-disk store
+## Store manifest
 
-A clew store is a directory of the following shape:
-
-```
-.clew/
-├── spans/<aa>/<id>.jsonl  # one shard per span (content-addressed)
-├── index.sqlite           # queryable index, rebuildable from JSONL
-├── refs/<name>            # named pointers to span ids (one per line)
-├── HEAD                    # current branch name
-└── manifest.json           # store metadata
-```
-
-### `spans/<aa>/<id>.jsonl`
-
-A single span is serialized as a JSON object (no trailing
-whitespace, one per line):
+`.clew/manifest.json` is a JSON object containing:
 
 ```json
 {
-  "id": "ca29377a80f1...",
-  "trace_id": "...",
-  "parent_ids": ["..."],
+  "format": "clew-store",
+  "version": 2,
+  "created_at": "RFC 3339 timestamp"
+}
+```
+
+An absent manifest beside v2 records is an error. A different version raises
+`UnsupportedStoreVersion`. Opening an unsupported store does not create or change its
+records, index, lock, HEAD, or refs.
+
+## Span record
+
+Each record lives at `.clew/spans/<id[:2]>/<id>.json` and is canonical JSON for one
+immutable finalized `Span`:
+
+```json
+{
+  "id": "32 lowercase UUID4 hex characters",
+  "trace_id": "32 lowercase UUID4 hex characters",
+  "parent_ids": [],
+  "sequence": 0,
   "type": "OBSERVATION",
-  "name": "plan",
-  "attributes": {"model": "gpt-4o"},
-  "input": {"q": "..."},
-  "output": "...",
-  "started_at": "2024-01-01T00:00:00+00:00",
-  "ended_at": "2024-01-01T00:00:01+00:00",
+  "name": "agent",
+  "attributes": {},
+  "input": null,
+  "output": null,
+  "started_at": "2026-07-15T10:00:00Z",
+  "ended_at": "2026-07-15T10:00:01Z",
   "status": "OK",
   "error": null,
-  "metadata": null
+  "metadata": null,
+  "content_hash": "64 lowercase SHA-256 hex characters"
 }
 ```
 
-The id is the SHA-256 of the canonical-JSON serialization of
-the span *with the `id` field set to an empty string*. See
-[Content addressing](../internals/content-addressing.md) for
-the algorithm.
+`type` is `LLM`, `TOOL`, `DECISION`, or `OBSERVATION`. Persisted `status` is `OK`,
+`ERROR`, or `SKIPPED`. `ERROR` requires a non-empty error; the other statuses forbid one.
 
-### `index.sqlite`
+`content_hash` is SHA-256 over canonical JSON for every field above except
+`content_hash`. Parent list order is significant.
 
-A rebuildable SQLite index. The schema is:
+## Trace invariants
 
-```sql
-CREATE TABLE spans (
-  id TEXT PRIMARY KEY,
-  trace_id TEXT NOT NULL,
-  type TEXT NOT NULL,
-  name TEXT NOT NULL,
-  started_at REAL,
-  ended_at REAL,
-  status TEXT NOT NULL,
-  parent_ids TEXT NOT NULL DEFAULT '[]',
-  content_hash TEXT NOT NULL
-);
-CREATE INDEX idx_spans_trace_id ON spans(trace_id);
-```
+All records in one trace share `trace_id`, have unique IDs and unique `sequence` values,
+contain exactly one parentless root, reference only present same-trace parents, and form an
+acyclic graph.
 
-`parent_ids` is a JSON-encoded list. `started_at` and
-`ended_at` are epoch seconds (REAL, millisecond precision).
-`content_hash` is the result of
-`clew.utils.hash.span_hash(span)`.
+## Refs and HEAD
 
-If the index is missing or corrupt, deleting `index.sqlite`
-and reopening the store triggers a rebuild from the JSONL
-files.
+`.clew/refs/<name>` contains exactly one 32-character span ID plus a newline. The all-zero
+ID is permitted only as the initial empty placeholder. `.clew/HEAD` contains a validated
+branch name. Updates use unique temporary files and atomic replacement while the store's
+cross-process lock is held.
 
-### `refs/<name>`
+## SQLite index
 
-A text file containing one line: the span id the branch points
-at. 64 hex characters, no prefix, trailing newline optional.
+`index.sqlite` is a WAL-mode performance index, not authoritative data. Clew rebuilds a
+missing or invalid index from verified JSON records. A unique `(trace_id, sequence)`
+constraint detects ordering conflicts.
 
-The placeholder ref is `0` * 64 (64 zeros) — this is the
-default value for a freshly-initialized branch.
+## Bundle v2
 
-### `HEAD`
+See [Signed bundle format v2](../internals/bundle-format.md). Bundle v1 is rejected.
 
-A text file containing one line: the name of the currently
-checked-out branch.
+## OTel-shaped NDJSON
 
-### `manifest.json`
-
-A JSON object. Schema:
-
-```json
-{
-  "version": 1,
-  "created_at": "2024-01-01T00:00:00.000+00:00"
-}
-```
-
-`version` is the clew on-disk format version. Currently 1.
-`created_at` is the time the store was initialized.
-
-## Bundle format
-
-A bundle is a tar.gz containing a single signed trace. See
-[Bundle format (v1)](../internals/bundle-format.md) for the
-full spec.
-
-## OTel NDJSON
-
-A trace exported via `clew export` is one JSON object per line:
-a leading `_kind: trace` header followed by every span in OTel
-shape. See the [OTel integration guide](../integrations/otel.md)
-for the mapping details.
-
-## MCP protocol
-
-`clew mcp` exposes the store over the [Model Context Protocol](https://modelcontextprotocol.io).
-12 tools + 2 resources; see the
-[MCP integration guide](../integrations/mcp.md).
-
-## Versioning
-
-- **Store format** follows semver: a 1.x.y release of clew
-  always reads a 1.x.z store. Future majors (2.0.0) will
-  include a migration tool.
-- **Bundle format** follows semver: a 1.x.y release of clew
-  always reads a 1.x.z bundle. The bundle's `version` field
-  tracks the format.
-- **CLI and Python API** are *not* part of the protocol —
-  they can change between any release (though we try to keep
-  them stable within a major version).
-
-## See also
-
-- [Architecture](../internals/architecture.md) — the high-level design
-- [Content addressing](../internals/content-addressing.md) — how ids are computed
-- [Bundle format](../internals/bundle-format.md) — the v1 bundle spec
+NDJSON is an import/export projection, not the canonical store and not OTLP. Bulk import
+allocates fresh Clew identities and rewrites topology. See
+[OTel-shaped NDJSON](../integrations/otel.md).

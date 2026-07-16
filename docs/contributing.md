@@ -2,4 +2,4 @@
 
 The contributing guide is in the repo root.
 
-See [CONTRIBUTING.md on GitHub](https://github.com/clew/clew/blob/main/CONTRIBUTING.md).
+See [CONTRIBUTING.md on GitHub](https://github.com/samsamurai301/clew-ai/blob/main/CONTRIBUTING.md).

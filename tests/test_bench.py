@@ -1,4 +1,5 @@
 """Tests for the ``clew bench`` command."""
+
 from __future__ import annotations
 
 import json
@@ -6,6 +7,8 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+
+import pytest
 
 from clew.bench import bench
 
@@ -37,9 +40,12 @@ def test_bench_cli_runs() -> None:
                 "-m",
                 "clew",
                 "bench",
-                "--spans", "50",
-                "--traces", "3",
-                "--orphans", "10",
+                "--spans",
+                "50",
+                "--traces",
+                "3",
+                "--orphans",
+                "10",
             ],
             capture_output=True,
             text=True,
@@ -63,10 +69,14 @@ def test_bench_writes_json() -> None:
                 "-m",
                 "clew",
                 "bench",
-                "--spans", "30",
-                "--traces", "2",
-                "--orphans", "5",
-                "--out", str(out),
+                "--spans",
+                "30",
+                "--traces",
+                "2",
+                "--orphans",
+                "5",
+                "--out",
+                str(out),
             ],
             capture_output=True,
             text=True,
@@ -78,3 +88,16 @@ def test_bench_writes_json() -> None:
         data = json.loads(out.read_text())
     assert "record_ms" in data
     assert data["traces_recorded"] == 2
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"n_traces": 0, "spans_per_trace": 1, "n_orphans": 0}, "n_traces"),
+        ({"n_traces": 1, "spans_per_trace": 0, "n_orphans": 0}, "spans_per_trace"),
+        ({"n_traces": 1, "spans_per_trace": 1, "n_orphans": -1}, "n_orphans"),
+    ],
+)
+def test_bench_rejects_invalid_sizes(tmp_path: Path, kwargs: dict[str, int], message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        bench(tmp_path / ".clew", **kwargs)

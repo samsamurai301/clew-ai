@@ -2,7 +2,70 @@
 
 All notable changes to `clew` are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project
-adheres to [Semantic Versioning](https://semver.org/).
+generally follows [Semantic Versioning](https://semver.org/). Version 1.1.5 is a documented
+breaking corrective exception while the project is still new.
+
+## [1.1.5] — 2026-07-15
+
+The recovery release. Clew is now a Beta, zero-server, Git-like what-if debugger for
+Python agent traces.
+
+### Breaking compatibility notice
+
+- Store and signed-bundle format v2 are the only persisted formats accepted.
+- Existing v1 stores and bundles are refused without modification. Archive or rename
+  `.clew`, then initialize a new v2 store; ambiguous v1 collisions cannot be migrated
+  safely in the general case.
+- Public `Span` objects are finalized and immutable. Persisted status is `OK`, `ERROR`, or
+  `SKIPPED`; in-flight state is internal.
+- Executors now accept `(Span, ReplayContext)` and return constrained `ReplayResult` values.
+
+### Correctness and durability
+
+- Every span occurrence and trace has an independent UUID4 hexadecimal identity.
+- `sequence` provides unique deterministic order per trace; `content_hash` verifies every
+  persisted field except itself.
+- Exact repeat writes are idempotent. Conflicting IDs, duplicate sequences, invalid hashes,
+  missing parents, cross-trace parents, cycles, and malformed refs fail explicitly.
+- Canonical `.json` records, store manifest v2, cross-process locking, unique exclusive
+  temporary files, `fsync`, atomic replacement, SQLite WAL/busy timeouts, and crash-safe
+  index rebuilding replace the v1 storage path.
+- Opening a v1 store creates no lock, index, HEAD, ref, or replacement data.
+
+### Replay and diff
+
+- Replay preallocates the full destination topology and rewrites every parent into the new
+  trace, including partial replay ancestor closure and multi-parent joins.
+- Sync and async executors receive finalized destination parents in
+  `ReplayContext.parent_chain`.
+- Executor failure persists an `ERROR` occurrence and dependent `SKIPPED` descendants,
+  prints the diagnostic trace ID, and exits nonzero.
+- Structural diff alignment uses ancestry, type/name, and sibling occurrence order so
+  repeated sibling names remain independent.
+- `clew demo` provides an offline failure → replay → branch → diff → HTML walkthrough.
+  Both `clew` and `clew-ai` scripts are installed.
+
+### Integrations and packaging
+
+- OpenAI and Anthropic wrappers support sync and async clients, preserve nesting, redact
+  credential-shaped inputs, and capture output, usage, model, and errors idempotently.
+- The LangChain handler subclasses `BaseCallbackHandler`, honors `parent_run_id`, and
+  handles concurrent runs. MCP is tested with the public Python MCP client.
+- The NDJSON bridge is described accurately as OTel-shaped JSON, not OTLP.
+- MCP, Textual, LangChain, provider SDKs, and OTel tooling moved to named extras.
+  `cryptography` remains core for signed bundles. `py.typed` is included.
+- Metadata targets the personal repository and GitHub Pages, supports Python 3.11–3.14,
+  and uses the Beta maturity classifier.
+
+### Public trust
+
+- Removed nonexistent organization owners, funding endpoints, domain/email claims, and
+  hard-coded quality badges. Documentation and security reporting point to
+  `github.com/samsamurai301/clew-ai` and GitHub private vulnerability reporting.
+- Documentation now states that 1.1.4 is unsafe because of trace identity collisions and
+  incorrect project links. Its existing tag remains historical and must not be changed;
+  the tagged source does not reproduce the manually uploaded PyPI artifact.
+- Runtime analytics remain absent. Any future telemetry must be explicit opt-in.
 
 ## [1.1.4] — 2026-07-14
 
@@ -86,7 +149,7 @@ The polish release. Every previously-flagged issue is fixed.
 
 ### Documentation
 
-- `.github/CODEOWNERS` (security team for sensitive code).
+- `.github/CODEOWNERS` (personal maintainer ownership for sensitive code).
 - `.github/dependabot.yml` (weekly pip + GitHub Actions updates).
 - `mkdocs build --strict` verified — no broken links, no missing pages.
 - `pip-audit` against the resolved 1.1.3 dep tree: no known vulnerabilities.
@@ -145,7 +208,7 @@ and a portable HTML viewer for sharing traces by email.
 - **MCP server** (`clew mcp`). 12 tools (list/get/search/diff/
   branch/checkout/replay/etc.) and 2 resources over the Model
   Context Protocol. Connects to Claude Desktop, Cursor, Cline,
-  the MCP Inspector. Install with `uv add 'clew[mcp]'`.
+  the MCP Inspector. Install with `uv add 'clew-ai[mcp]'`.
 - **HTML reports** (`clew show <id> --html <path>`). A single
   self-contained interactive page — collapsible tree, ERROR
   highlights, input/output on demand. Drop in an email, S3
@@ -162,7 +225,7 @@ and a portable HTML viewer for sharing traces by email.
 - **mkdocs site** (`docs/` + `mkdocs.yml`). Full documentation:
   getting started, user guide, integrations, internals,
   reference, community.
-- **Issue templates + PR template + FUNDING.yml** for GitHub.
+- **Issue templates + PR template** for GitHub.
 
 ### Fixed
 

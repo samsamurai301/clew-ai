@@ -1,6 +1,6 @@
 name: 'clew trace'
 description: 'Run a clew-traced step and upload the resulting trace as an artifact'
-author: 'clew authors'
+author: 'samsamurai301'
 
 inputs:
   python-version:
@@ -14,10 +14,6 @@ inputs:
   run:
     description: 'Command to run (recorded as a single span)'
     required: true
-  store-dir:
-    description: 'Where to put the .clew store'
-    required: false
-    default: '.clew'
   artifact-name:
     description: 'Artifact name for the uploaded trace'
     required: false
@@ -25,40 +21,55 @@ inputs:
   upload:
     description: 'Whether to upload the trace as an artifact'
     required: false
+    default: 'false'
+  clean-env:
+    description: 'Run with a minimal environment so workflow secrets are not captured'
+    required: false
     default: 'true'
 
 runs:
   using: 'composite'
   steps:
-    - uses: actions/setup-python@v5
+    - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
       with:
         python-version: ${{ inputs.python-version }}
     - name: Install clew
       shell: bash
-      run: pip install clew
+      run: pip install clew-ai==1.1.5
     - name: Run ${{ inputs.run }} under clew
+      id: trace
+      continue-on-error: true
       shell: bash
       working-directory: ${{ inputs.working-directory }}
+      env:
+        CLEW_ACTION_RUN: ${{ inputs.run }}
       run: |
-        mkdir -p "${{ inputs.store-dir }}"
-        cd "${{ inputs.working-directory }}"
-        clew trace --name "${{ inputs.run }}" -- "${{ inputs.run }}"
+        clew init .
+        if [[ "${{ inputs.clean-env }}" == "true" ]]; then
+          clew trace --name ci-step --clean-env -- bash -euo pipefail -c "$CLEW_ACTION_RUN"
+        else
+          clew trace --name ci-step -- bash -euo pipefail -c "$CLEW_ACTION_RUN"
+        fi
     - name: Export trace to HTML
-      if: ${{ inputs.upload == 'true' }}
+      if: ${{ always() && inputs.upload == 'true' }}
       shell: bash
       working-directory: ${{ inputs.working-directory }}
       run: |
-        TID=$(clew log --json | jq -r '.[0].trace_id')
+        TID=$(clew log --json | head -n 1 | jq -r '.trace_id')
         clew show "$TID" --html trace.html
     - name: Upload trace
-      if: ${{ inputs.upload == 'true' }}
-      uses: actions/upload-artifact@v4
+      if: ${{ always() && inputs.upload == 'true' }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
       with:
         name: ${{ inputs.artifact-name }}
         path: |
           ${{ inputs.working-directory }}/.clew
           ${{ inputs.working-directory }}/trace.html
         if-no-files-found: warn
+    - name: Propagate command failure
+      if: ${{ steps.trace.outcome == 'failure' }}
+      shell: bash
+      run: exit 1
 
 branding:
   icon: 'git-branch'

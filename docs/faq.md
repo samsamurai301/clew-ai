@@ -1,136 +1,68 @@
-# Frequently asked questions
+# FAQ
 
-## What does "clew" mean?
+## What is Clew?
 
-It's from Greek mythology: Ariadne's clew (ball of thread) helped
-Theseus find his way out of the labyrinth. The clew library helps
-*you* find your way through a maze of LLM reasoning by recording
-every step, branching at interesting points, and replaying the
-alternatives to see what would have happened.
+Clew is a zero-server, Git-like what-if debugger for Python agent traces. It records local
+execution evidence, replays a whole trace or selected suffix through another executor,
+branches the result, and structurally diffs the outcomes.
 
-## How is this different from LangSmith / Arize / Langfuse / agentlens?
+## Does Clew send telemetry?
 
-Those are observability platforms. They record spans, ship them to a
-server, and give you dashboards. `clew` is local-first: your traces
-live in a `.clew/` directory in your repo, content-addressed, and
-git-style branchable. Nothing leaves your machine unless you
-explicitly `clew share` it.
+No. Clew 1.1.5 makes no analytics requests. Provider integrations still make the provider
+calls requested by the host application. Adoption is measured outside the runtime through
+GitHub, PyPI, and documentation aggregates.
 
-The killer feature is **branching**. When your agent does something
-surprising, you can fork the trace at the decision point, replay the
-fork with a different prompt or model, and `clew diff` the two
-outcomes. None of the observability platforms can do that.
+## Is Clew an observability platform?
 
-## Why is the store a `.clew` directory instead of a database file?
+No. It is a focused package-and-files workflow. Broader products provide dashboards,
+evaluation, collaboration, managed storage, or production observability. Relevant current
+capabilities include:
 
-Because the on-disk layout *is* the API:
+- [LangGraph replay and fork](https://docs.langchain.com/oss/python/langgraph/use-time-travel)
+  for checkpointed LangGraph state.
+- [LangSmith trace comparison](https://docs.langchain.com/langsmith/manage-trace).
+- [Arize Phoenix](https://arize.com/docs/phoenix) replay, observability, and self-hosting.
+- [Langfuse self-hosting](https://langfuse.com/self-hosting) for a broader LLM engineering
+  platform.
 
-- `spans/<aa>/<id>.jsonl` — content-addressed, two identical spans
-  share one file. No fragmentation, no dedup, no migrations.
-- `refs/<name>` — text files containing one span id. Branching is
-  `echo <id> > refs/feature-x`.
-- `HEAD` — one line, the current branch. `cat HEAD` tells you
-  where you are.
-- `manifest.json` + `index.sqlite` — metadata and an index, both
-  rebuildable from the span files.
+Use Clew when local trace files and a failure → replay → branch → diff loop fit the job.
 
-`git` proved this design pattern for source code; we use the same
-pattern for reasoning. Everything is plain text (or a rebuildable
-SQLite), so you can `grep`, `cat`, `find`, `wc`, and version-control
-your way through it.
+## Is the NDJSON format OpenTelemetry or OTLP?
 
-## Is this a replacement for OpenTelemetry?
+It is **OTel-shaped JSON**. It borrows familiar field names and preserves `gen_ai.*`
+attributes. It is not an OTLP exporter/receiver and has not passed OTLP interoperability
+tests.
 
-No. `clew` is local-first and single-machine; OTel is the standard
-for shipping telemetry to a backend. They complement each other:
+## Why does every identical call get a different ID?
 
-- `clew`'s OTel bridge (`clew.sdk.otel.instrument_openai`) emits
-  spans that are also valid OTel `gen_ai.*` dicts.
-- `clew export` writes a trace to NDJSON in OTel's shape, so a
-  collector can ingest it.
-- `clew otel-import` reads OTel NDJSON back into a `clew` store,
-  so you can branch and replay traces you captured elsewhere.
+Because each call is a separate occurrence. Collapsing equal inputs would erase frequency,
+ordering, errors, and nondeterministic outputs. The UUID identifies the event; the
+`content_hash` protects the exact finalized record.
 
-Use `clew` when you need branching. Use OTel when you need a
-backend. Use both: instrument once, pipe to either sink.
+## Can 1.1.5 open my old `.clew` store?
 
-## How big can a store get?
+No. It detects v1 and refuses it without modification. Archive or rename the directory and
+initialize v2. See the [compatibility notice](migration.md).
 
-We haven't measured the upper bound; the design is file-per-span
-with a SQLite index, so a million-span store would be ~1M small
-files. The filesystem inodes are the limit, not clew.
+## What happens when replay fails?
 
-If you're worried about scale, run `clew doctor` periodically —
-it will tell you if the store is in good shape — and `clew gc` to
-clean up orphan spans.
+The failing occurrence is persisted as `ERROR`, dependent descendants are persisted as
+`SKIPPED`, and the complete diagnostic trace remains available. The CLI prints its trace ID
+and exits nonzero.
 
-## What if I want to ship spans to a backend?
+## Are traces encrypted?
 
-`clew` doesn't ship spans anywhere by default. The closest
-thing to a "backend" is `clew share`, which creates a signed
-tarball. From there you can:
+No. Stores and bundles contain plaintext payloads. Signed bundles provide integrity and
+signer-key authenticity, not confidentiality. Protect the store and encrypt shared bundles
+separately.
 
-- Upload to S3 / GitHub Releases and have teammates `clew import`.
-- Untar and `clew otel-import` into another store.
-- Pipe the `clew export` NDJSON into an OTel collector that
-  supports the file exporter.
+## Can I use OpenAI, Anthropic, LangChain, MCP, or a TUI?
 
-If you need a real OTel exporter, wrap your tracer with the OTel
-SDK and have *it* emit to your backend; clew can coexist.
+Yes, through named extras: `openai`, `anthropic`, `langchain`, `mcp`, and `tui`. Provider
+wrappers support sync and async clients. The LangChain handler subclasses the real callback
+base and honors `parent_run_id`. The MCP server uses stdio and is tested with the public MCP
+client.
 
-## How does replay work?
+## What Python versions are supported?
 
-`clew replay <trace>` walks the trace, copies the ancestor chain
-into a new trace, and re-executes the descendants with the same
-inputs but the current code (or a different executor you provide
-via `--executor`). The new trace shares span ids with the old one
-where the content is the same (content-addressed dedup), so you
-can `clew diff` the old and new traces and the diff highlights
-only the changed parts.
-
-If your agent is non-deterministic (real LLMs), the replay will
-produce different outputs — that's the point. Replay with a
-`MockExecutor` and you get a clean A/B test.
-
-## Why are span ids content-addressed?
-
-Two reasons:
-
-1. **Dedup** — if your agent retries the same call, the second
-   attempt's span collapses into the first. You don't get
-   duplicate rows in your index.
-2. **Branching** — when you replay a trace, ancestors that are
-   bit-identical to the original share the same span id. The
-   diff engine matches spans by id *or* by path-from-root, so
-   modified descendants land side-by-side in the diff view.
-
-The cost is that span ids aren't sequential. We make up for it
-with a per-trace topological order so `clew show` renders the
-tree in execution order.
-
-## Can I use clew with my existing OTel-instrumented code?
-
-Yes. `clew` doesn't replace OTel; it complements it. Three ways
-to combine:
-
-1. **Dual-write**: instrument with both `clew.Tracer` and the
-   OTel SDK. The two coexist.
-2. **Bridge**: `clew.sdk.otel.instrument_openai` wraps OpenAI
-   clients to also emit `clew` spans. Use it on the same clients
-   you wrap for OTel.
-3. **Round-trip**: capture with OTel, export to NDJSON, import
-   into `clew` with `clew otel-import` for branching/replay.
-
-## How do I migrate from v0.x to v1.0?
-
-The on-disk store format has not changed. If you have a `v0.1.0`
-store, you can open it with `v1.0.0` and it just works. Two
-breaking changes in v1.0.0 affect the *CLI* and the *Python API*:
-
-- `clew share` now requires `--key <private-key>` (the unsigned
-  bundle was a v0.1.0 placeholder). Run `clew keygen` once and
-  reuse the key.
-- `clew bundle import` was renamed to `clew import`. The new
-  `clew otel-import` is for the NDJSON form.
-
-See `CHANGELOG.md` for the full list.
+Python 3.11, 3.12, 3.13, and 3.14.

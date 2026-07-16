@@ -106,6 +106,7 @@ def test_share_e2e(tmp_path: Path) -> None:
     out = tmp_path / "out.tgz"
     # Generate a key for signing.
     from clew.core.bundle import generate_keypair
+
     priv_pem, _ = generate_keypair()
     key = tmp_path / "key.pem"
     key.write_bytes(priv_pem)
@@ -121,6 +122,7 @@ def test_share_e2e(tmp_path: Path) -> None:
     assert proc.returncode == 0, proc.stderr
     assert out.exists()
     import tarfile
+
     with tarfile.open(out, "r:gz") as tar:
         names = tar.getnames()
     assert "manifest.json" in names

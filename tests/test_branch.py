@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,7 @@ from .conftest import make_span  # type: ignore[import-not-found]
 def _open_store(tmp_path: Path | None = None) -> tuple[Store, TraceStore]:
     """Open a fresh store under tmp_path (or a fresh tempdir)."""
     import tempfile
+
     if tmp_path is None:
         tmp_path = Path(tempfile.mkdtemp())
     store_path = tmp_path / ".clew"
@@ -183,6 +185,7 @@ def test_branch_rejects_hidden_names(tmp_path: Path) -> None:
 def test_branch_list_skips_symlinks(tmp_path: Path) -> None:
     """BranchManager.list() refuses to follow symlinks in refs/."""
     import os
+
     store_path = tmp_path / ".clew"
     store = Store(store_path)
     ts = TraceStore(store)
@@ -210,4 +213,28 @@ def test_current_rejects_poisoned_head(tmp_path: Path) -> None:
     # Plant a poisoned HEAD
     (store_path / "HEAD").write_text("bad/../etc\n", encoding="utf-8")
     with pytest.raises(ValueError, match="invalid branch name"):
+        bm.current()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlink creation may require Windows privileges")
+def test_get_rejects_symlinked_ref_without_reading_target(tmp_path: Path) -> None:
+    store_path = tmp_path / ".clew"
+    bm = BranchManager(TraceStore(Store(store_path)))
+    target = tmp_path / "outside.txt"
+    target.write_text("0" * 32)
+    (store_path / "refs" / "linked").symlink_to(target)
+    with pytest.raises(ValueError, match="regular single-link"):
+        bm.get("linked")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlink creation may require Windows privileges")
+def test_current_rejects_symlinked_head_without_reading_target(tmp_path: Path) -> None:
+    store_path = tmp_path / ".clew"
+    bm = BranchManager(TraceStore(Store(store_path)))
+    head = store_path / "HEAD"
+    head.unlink()
+    target = tmp_path / "outside.txt"
+    target.write_text("main\n")
+    head.symlink_to(target)
+    with pytest.raises(ValueError, match="regular single-link"):
         bm.current()

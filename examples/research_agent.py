@@ -1,10 +1,10 @@
-"""End-to-end demo: a research agent with clew branching + replay + diff.
+"""End-to-end offline research-agent workflow with replay and diff.
 
-This example shows the *killer* clew workflow:
+This example shows Clew's local what-if workflow:
 
     1. Run a research agent on "what is clew?" with model gpt-4o.
-    2. Branch the trace at the LLM call.
-    3. Replay the branch with gpt-4o-mini (faster, cheaper).
+    2. Create a branch ref for the recorded trace.
+    3. Record a second run and replay the original with the mock executor.
     4. `clew diff` the two outcomes.
 
 The agent itself is a 3-step LLM chain: plan -> search -> answer.
@@ -41,10 +41,7 @@ from clew.sdk.tracer import Tracer
 
 
 _RESPONSES: dict[str, str] = {
-    "gpt-4o": (
-        "clew is a local-first, content-addressed debugger for AI agent "
-        "reasoning traces, similar to git but for agent execution paths."
-    ),
+    "gpt-4o": ("Clew is a zero-server, Git-like what-if debugger for Python agent traces."),
     "gpt-4o-mini": (
         "clew is a tool that records how AI agents think and lets you "
         "branch and replay the reasoning."
@@ -66,8 +63,8 @@ def mock_llm(model: str, prompt: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def run_research_agent(t: Tracer, model: str, query: str) -> tuple[str, str]:
-    """Run a 3-step research agent and return ``(answer, root_id)``.
+def run_research_agent(t: Tracer, model: str, query: str) -> tuple[str, str, str]:
+    """Run a 3-step research agent and return answer, trace id, and root id.
 
     The trace layout is:
         run_research_agent  (root, agent)
@@ -75,11 +72,9 @@ def run_research_agent(t: Tracer, model: str, query: str) -> tuple[str, str]:
             search          (TOOL, mock)
             answer          (LLM)
 
-    The ``model`` argument is part of every LLM span's *input* so
-    the content-addressed span id is unique per model. That's the
-    point: switching models should change the trace.
+    Every recorded occurrence receives a fresh ID. The model remains in
+    the root input so the trace also describes which configuration ran.
     """
-    from clew.sdk.context import current_span
 
     @t.agent
     def run(q: str, m: str) -> str:
@@ -97,18 +92,16 @@ def run_research_agent(t: Tracer, model: str, query: str) -> tuple[str, str]:
 
         p = plan()
         s = search(p)
-        out = answer(p, s)
-        # The agent's root span is the current active span right
-        # before it returns. We capture it before the agent finalizes
-        # so the caller can branch / diff on it.
-        root = current_span()
-        if root is None:
-            raise RuntimeError("no active root span — agent not properly initialized")
-        t._last_root = root.id  # type: ignore[attr-defined]
-        return out
+        return answer(p, s)
 
+    before = set(t.store.store.iter_traces())
     answer = run(query, model)
-    return answer, t._last_root  # type: ignore[attr-defined]
+    created = set(t.store.store.iter_traces()) - before
+    if len(created) != 1:
+        raise RuntimeError(f"expected one new trace, found {len(created)}")
+    trace_id = created.pop()
+    trace = t.store.get_trace(trace_id)
+    return answer, trace_id, trace.root_span_id
 
 
 # ---------------------------------------------------------------------------
@@ -129,13 +122,12 @@ def main() -> None:
         # 2. Run the agent with the bigger model.
         print(">>> running agent with gpt-4o")
         t1 = Tracer(cwd=workdir)
-        answer1, root_id_1 = run_research_agent(t1, "gpt-4o", "what is clew?")
+        answer1, trace_id_1, root_id_1 = run_research_agent(t1, "gpt-4o", "what is clew?")
         # Move main onto the root span so we can branch.
         ts1 = TraceStore(Store(clew_path))
         from clew.core.branch import BranchManager
 
         BranchManager(ts1).move("main", root_id_1)
-        trace_id_1 = ts1._trace_id_of(root_id_1)  # type: ignore[attr-defined]
         print(f"  trace_id (gpt-4o):   {trace_id_1}")
         print(f"  answer:    {answer1!r}\n")
 
@@ -145,10 +137,9 @@ def main() -> None:
         BranchManager(ts1).create("mini", root_id_1)
         run_cli("checkout", "mini", "--root", str(clew_path))
         t2 = Tracer(cwd=workdir)
-        answer2, root_id_2 = run_research_agent(t2, "gpt-4o-mini", "what is clew?")
+        answer2, trace_id_2, root_id_2 = run_research_agent(t2, "gpt-4o-mini", "what is clew?")
         # Move the new branch onto the new root.
         BranchManager(ts1).move("mini", root_id_2)
-        trace_id_2 = ts1._trace_id_of(root_id_2)  # type: ignore[attr-defined]
         print(f"  trace_id (mini):     {trace_id_2}")
         print(f"  answer:    {answer2!r}\n")
 
@@ -202,24 +193,6 @@ def run_cli(*args: str) -> str:
         print(f"  CLI failed: {result.stderr}")
         raise SystemExit(result.returncode)
     return result.stdout
-
-
-# Hack: expose the last root span id from the most recent run.
-def _last_root_span_id(self: Tracer) -> str:
-    """Return the id of the most recently created root span."""
-    if hasattr(self, "_last_root"):
-        return self._last_root
-    raise RuntimeError("no root span has been recorded yet")
-
-
-Tracer._last_root_span_id = _last_root_span_id  # type: ignore[attr-defined]
-
-# And expose _trace_id_of on TraceStore.
-def _trace_id_of(self: TraceStore, span_id: str) -> str:
-    return self.store.get(span_id).trace_id
-
-
-TraceStore._trace_id_of = _trace_id_of  # type: ignore[attr-defined]
 
 
 if __name__ == "__main__":

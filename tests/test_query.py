@@ -10,7 +10,7 @@ import pytest
 
 from clew.core.branch import BranchManager
 from clew.core.models import Span, SpanStatus, SpanType
-from clew.core.query import QueryFilter, parse_metadata_spec, query
+from clew.core.query import MAX_METADATA_VALUE_BYTES, QueryFilter, parse_metadata_spec, query
 from clew.core.store import Store
 from clew.core.trace import TraceStore
 
@@ -24,11 +24,13 @@ def _span(
     status: SpanStatus = SpanStatus.OK,
     metadata: dict[str, object] | None = None,
     error: str | None = None,
+    sequence: int = 0,
 ) -> Span:
     return Span(
         id=uuid4().hex,
         trace_id=trace_id,
         parent_ids=parent_ids or [],
+        sequence=sequence,
         type=type,
         name=name,
         attributes={},
@@ -50,7 +52,14 @@ def _seed_two_traces(root: Path) -> tuple[str, str, list[Span]]:
     # Trace A: llm + tool + chain root
     tid_a = uuid4().hex
     a_root = _span(trace_id=tid_a, name="agent-run", type=SpanType.OBSERVATION)
-    a_llm = _span(trace_id=tid_a, parent_ids=[a_root.id], name="gpt-4o-call", type=SpanType.LLM, metadata={"model": "gpt-4o"})
+    a_llm = _span(
+        trace_id=tid_a,
+        parent_ids=[a_root.id],
+        name="gpt-4o-call",
+        type=SpanType.LLM,
+        metadata={"model": "gpt-4o"},
+        sequence=1,
+    )
     a_tool = _span(
         trace_id=tid_a,
         parent_ids=[a_llm.id],
@@ -59,11 +68,16 @@ def _seed_two_traces(root: Path) -> tuple[str, str, list[Span]]:
         status=SpanStatus.ERROR,
         error="tool failed: timeout",
         metadata={"tool_name": "search"},
+        sequence=2,
     )
     # Trace B: simpler
     tid_b = uuid4().hex
-    b_root = _span(trace_id=tid_b, name="agent-run", type=SpanType.OBSERVATION, metadata={"model": "claude-3"})
-    b_llm = _span(trace_id=tid_b, parent_ids=[b_root.id], name="claude-call", type=SpanType.LLM)
+    b_root = _span(
+        trace_id=tid_b, name="agent-run", type=SpanType.OBSERVATION, metadata={"model": "claude-3"}
+    )
+    b_llm = _span(
+        trace_id=tid_b, parent_ids=[b_root.id], name="claude-call", type=SpanType.LLM, sequence=1
+    )
     for s in (a_root, a_llm, a_tool, b_root, b_llm):
         ts.add_span(s)
         spans.append(s)
@@ -170,6 +184,12 @@ def test_query_limit_caps_results(tmp_path: Path) -> None:
     assert len(r) == 2
 
 
+@pytest.mark.parametrize("limit", [0, -1, True, 1.5])
+def test_query_rejects_invalid_limits(limit: object) -> None:
+    with pytest.raises(ValueError, match="positive integer"):
+        QueryFilter(limit=limit)  # type: ignore[arg-type]
+
+
 def test_query_empty_store(tmp_path: Path) -> None:
     root = tmp_path / ".clew"
     Store(root)
@@ -217,6 +237,17 @@ def test_parse_metadata_spec_empty_value_is_empty_string() -> None:
 def test_parse_metadata_spec_rejects_no_equals() -> None:
     with pytest.raises(ValueError, match="key=value"):
         parse_metadata_spec(["justakey"])
+
+
+def test_parse_metadata_spec_rejects_deep_nesting_cleanly() -> None:
+    deeply_nested = "[" * 10_000 + "]" * 10_000
+    with pytest.raises(ValueError, match="nested too deeply"):
+        parse_metadata_spec([f"value={deeply_nested}"])
+
+
+def test_parse_metadata_spec_rejects_oversized_values() -> None:
+    with pytest.raises(ValueError, match="byte limit"):
+        parse_metadata_spec([f"value={'x' * (MAX_METADATA_VALUE_BYTES + 1)}"])
 
 
 # ---------------------------------------------------------------------------

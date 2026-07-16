@@ -162,3 +162,9 @@ coverage.xml
 
 # Local release helper, not part of the repo
 RELEASE.txt
+
+# Environment variables
+.env
+
+# Local publishing credentials
+token.txt

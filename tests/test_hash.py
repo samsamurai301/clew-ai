@@ -91,6 +91,12 @@ def test_canonical_json_rejects_set() -> None:
         canonical_json({1, 2, 3})
 
 
+def test_canonical_json_rejects_non_string_mapping_keys() -> None:
+    """JSON key coercion must not silently collapse distinct Python keys."""
+    with pytest.raises(TypeError, match="keys must be strings"):
+        canonical_json({1: "integer", "1": "string"})
+
+
 # ---------------------------------------------------------------------------
 # content_hash
 # ---------------------------------------------------------------------------
@@ -140,9 +146,10 @@ def test_content_hash_nested() -> None:
 def _make_span(**overrides: object) -> Span:
     """Build a deterministic Span for hashing tests."""
     defaults: dict[str, object] = {
-        "id": "a" * 64,
-        "trace_id": "b" * 64,
+        "id": "a" * 32,
+        "trace_id": "b" * 32,
         "parent_ids": [],
+        "sequence": 0,
         "type": SpanType.LLM,
         "name": "test",
         "attributes": {"gen_ai.system": "openai", "gen_ai.request.model": "gpt-4o"},
@@ -180,24 +187,24 @@ def test_span_hash_changes_when_content_changes() -> None:
     different_name = _make_span(name="other")
     different_input = _make_span(input={"messages": []})
     different_attrs = _make_span(attributes={"other": True})
-    different_status = _make_span(status=SpanStatus.RUNNING)
+    different_status = _make_span(status=SpanStatus.SKIPPED)
     assert span_hash(base) != span_hash(different_name)
     assert span_hash(base) != span_hash(different_input)
     assert span_hash(base) != span_hash(different_attrs)
     assert span_hash(base) != span_hash(different_status)
 
 
-def test_span_hash_excludes_trace_id() -> None:
-    """Two spans identical except for trace_id produce the same hash."""
-    span_a = _make_span(trace_id="a" * 64)
-    span_b = _make_span(trace_id="c" * 64)
+def test_span_hash_includes_trace_id() -> None:
+    """The exact-record hash protects trace identity too."""
+    span_a = _make_span(trace_id="a" * 32)
+    span_b = _make_span(trace_id="c" * 32)
     assert span_a.trace_id != span_b.trace_id
     assert span_a.id == span_b.id
-    assert span_hash(span_a) == span_hash(span_b)
+    assert span_hash(span_a) != span_hash(span_b)
 
 
 def test_span_hash_includes_id() -> None:
     """Two spans with different ids but otherwise identical have different hashes."""
-    span_a = _make_span(id="a" * 64)
-    span_b = _make_span(id="b" * 64)
+    span_a = _make_span(id="a" * 32)
+    span_b = _make_span(id="b" * 32)
     assert span_hash(span_a) != span_hash(span_b)

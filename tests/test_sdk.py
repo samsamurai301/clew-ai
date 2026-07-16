@@ -12,6 +12,7 @@ from clew.core.models import SpanStatus, SpanType
 from clew.core.store import Store
 from clew.core.trace import TraceStore
 from clew.sdk import Tracer
+from clew.sdk.context import current_span
 
 
 def test_tracer_creates_store_lazily(tmp_path: Path) -> None:
@@ -19,6 +20,7 @@ def test_tracer_creates_store_lazily(tmp_path: Path) -> None:
     cwd = tmp_path / "project"
     cwd.mkdir()
     import os
+
     old = os.getcwd()
     os.chdir(cwd)
     try:
@@ -62,19 +64,23 @@ def test_span_decorator_captures_exception(tmp_path: Path) -> None:
     assert spans[0].attributes["error.message"] == "kaboom"
 
 
-def test_span_id_is_deterministic(tmp_path: Path) -> None:
-    """Same input twice → same span id (content-addressed)."""
+def test_each_span_occurrence_has_a_unique_identity(tmp_path: Path) -> None:
+    """Identical inputs and differing outputs are preserved independently."""
     t = Tracer(cwd=tmp_path)
+    outputs = iter(["first", "second"])
 
-    @t.span("idempotent")
-    def f(x: int) -> int:
-        return x
+    @t.span("occurrence")
+    def f(x: int) -> str:
+        del x
+        return next(outputs)
 
     f(5)
     f(5)
     spans = list(t.store.store.iter_spans())
-    # Both calls produce the same span id; the store dedupes.
-    assert len(spans) == 1
+    assert len(spans) == 2
+    assert spans[0].id != spans[1].id
+    assert spans[0].trace_id != spans[1].trace_id
+    assert {span.output for span in spans} == {"first", "second"}
 
 
 def test_nested_spans_share_trace(tmp_path: Path) -> None:
@@ -131,6 +137,54 @@ def test_trace_context_manager(tmp_path: Path) -> None:
     assert s.type == SpanType.TOOL
     assert s.attributes.get("k") == "v"
     assert s.output == "done"
+
+
+def test_context_cleanup_survives_store_failure(tmp_path: Path, monkeypatch) -> None:
+    """A persistence exception never leaks active context into later spans."""
+    tracer = Tracer(cwd=tmp_path)
+
+    def fail(_span: object) -> str:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(tracer.store, "add_span", fail)
+    with pytest.raises(OSError, match="disk full"):
+        with tracer.trace("will-fail"):
+            assert current_span() is not None
+    assert current_span() is None
+
+
+def test_manual_span_cleanup_survives_store_failure(tmp_path: Path, monkeypatch) -> None:
+    tracer = Tracer(cwd=tmp_path)
+    active = tracer._begin("manual")
+    assert current_span() is active
+
+    def fail(_span: object) -> str:
+        raise OSError("read only")
+
+    monkeypatch.setattr(tracer.store, "add_span", fail)
+    with pytest.raises(OSError, match="read only"):
+        tracer._end(active.id)
+    assert current_span() is None
+
+
+def test_independent_tracers_do_not_inherit_each_others_context(tmp_path: Path) -> None:
+    first = Tracer(cwd=tmp_path / "first")
+    second = Tracer(cwd=tmp_path / "second")
+
+    @second.span("second-child")
+    def second_child() -> str:
+        return "ok"
+
+    @first.agent
+    def first_root() -> str:
+        return second_child()
+
+    assert first_root() == "ok"
+    first_span = next(first.store.store.iter_spans())
+    second_span = next(second.store.store.iter_spans())
+    assert first_span.parent_ids == []
+    assert second_span.parent_ids == []
+    assert first_span.trace_id != second_span.trace_id
 
 
 def test_lazy_store_creation(tmp_path: Path) -> None:

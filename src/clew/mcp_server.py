@@ -28,13 +28,12 @@ Resources exposed
 The server is started with ``clew mcp``. It speaks JSON-RPC over
 stdin/stdout, the standard MCP transport.
 
-Install: ``uv add 'clew[mcp]'`` (or ``uv add clew`` then
+Install: ``uv add 'clew-ai[mcp]'`` (or ``uv add clew-ai`` then
 ``uv add mcp``).
 """
 
 from __future__ import annotations
 
-import argparse
 import asyncio
 import json
 import sys
@@ -42,6 +41,7 @@ from pathlib import Path
 from typing import Any
 
 from mcp.server import Server
+from mcp.server.lowlevel.helper_types import ReadResourceContents
 from mcp.server.stdio import stdio_server
 from mcp.types import Resource, TextContent, Tool
 
@@ -52,7 +52,7 @@ from clew.core.health import check_store
 from clew.core.models import Span, SpanStatus, SpanType
 from clew.core.query import QueryFilter, parse_metadata_spec, query
 from clew.core.replay import MockExecutor, ReplayEngine
-from clew.core.store import Store
+from clew.core.store import STORE_VERSION, Store
 from clew.core.trace import TraceStore
 from clew.utils.paths import clew_root
 
@@ -67,7 +67,8 @@ def _open(root: str | None) -> tuple[Store, TraceStore, Path]:
     root_path = clew_root(cwd)
     if not (root_path / "manifest.json").exists():
         raise FileNotFoundError(f"no clew store at {root_path}; run `clew init` first")
-    return Store(root_path), TraceStore(Store(root_path)), root_path
+    store = Store(root_path)
+    return store, TraceStore(store), root_path
 
 
 def _span_to_dict(s: Span) -> dict[str, Any]:
@@ -76,6 +77,7 @@ def _span_to_dict(s: Span) -> dict[str, Any]:
         "id": s.id,
         "trace_id": s.trace_id,
         "parent_ids": list(s.parent_ids),
+        "sequence": s.sequence,
         "type": s.type.value,
         "name": s.name,
         "attributes": dict(s.attributes),
@@ -86,6 +88,7 @@ def _span_to_dict(s: Span) -> dict[str, Any]:
         "status": s.status.value,
         "error": s.error,
         "metadata": dict(s.metadata) if s.metadata else None,
+        "content_hash": s.content_hash,
     }
 
 
@@ -98,7 +101,7 @@ def build_server() -> Server:
     """Construct an MCP :class:`Server` exposing clew tools."""
     server: Server = Server("clew")
 
-    @server.list_tools()
+    @server.list_tools()  # type: ignore[untyped-decorator,no-untyped-call]
     async def list_tools() -> list[Tool]:
         return [
             Tool(
@@ -107,7 +110,12 @@ def build_server() -> Server:
                 "Returns an array of {trace_id, root_span_id, span_count, started_at}.",
                 inputSchema={
                     "type": "object",
-                    "properties": {"root": {"type": "string", "description": "Path to the .clew directory (optional). Defaults to the nearest one upward from cwd."}},
+                    "properties": {
+                        "root": {
+                            "type": "string",
+                            "description": "Path to the .clew directory (optional). Defaults to the nearest one upward from cwd.",
+                        }
+                    },
                     "required": [],
                 },
             ),
@@ -141,11 +149,20 @@ def build_server() -> Server:
                 inputSchema={
                     "type": "object",
                     "properties": {
-                        "name": {"type": "string", "description": "Substring (case-insensitive) match on span name."},
-                        "type": {"type": "string", "description": "Span type (LLM, TOOL, DECISION, OBSERVATION)."},
+                        "name": {
+                            "type": "string",
+                            "description": "Substring (case-insensitive) match on span name.",
+                        },
+                        "type": {
+                            "type": "string",
+                            "description": "Span type (LLM, TOOL, DECISION, OBSERVATION).",
+                        },
                         "status": {"type": "string", "description": "Span status (OK, ERROR)."},
                         "trace_id": {"type": "string"},
-                        "metadata": {"type": "object", "description": "Metadata filter as {key: value}."},
+                        "metadata": {
+                            "type": "object",
+                            "description": "Metadata filter as {key: value}.",
+                        },
                         "limit": {"type": "integer", "default": 50},
                         "root": {"type": "string"},
                     },
@@ -165,7 +182,10 @@ def build_server() -> Server:
                 inputSchema={
                     "type": "object",
                     "properties": {
-                        "name": {"type": "string", "description": "Branch name. Use 'HEAD' for the current branch."},
+                        "name": {
+                            "type": "string",
+                            "description": "Branch name. Use 'HEAD' for the current branch.",
+                        },
                         "root": {"type": "string"},
                     },
                     "required": ["name"],
@@ -191,7 +211,10 @@ def build_server() -> Server:
                     "type": "object",
                     "properties": {
                         "name": {"type": "string"},
-                        "from_span": {"type": "string", "description": "Span id to branch from. Defaults to current HEAD."},
+                        "from_span": {
+                            "type": "string",
+                            "description": "Span id to branch from. Defaults to current HEAD.",
+                        },
                         "root": {"type": "string"},
                     },
                     "required": ["name"],
@@ -216,7 +239,8 @@ def build_server() -> Server:
                     "type": "object",
                     "properties": {
                         "trace_id": {"type": "string"},
-                        "executor": {"type": "string", "enum": ["mock", "recording"], "default": "mock"},
+                        "executor": {"type": "string", "enum": ["mock"], "default": "mock"},
+                        "from_span": {"type": "string"},
                         "root": {"type": "string"},
                     },
                     "required": ["trace_id"],
@@ -252,13 +276,13 @@ def build_server() -> Server:
             ),
         ]
 
-    @server.list_resources()
+    @server.list_resources()  # type: ignore[untyped-decorator,no-untyped-call]
     async def list_resources() -> list[Resource]:
         # The list of resources is dynamic (depends on the store),
         # but for simplicity we expose a single store://info resource.
         # Trace-specific resources are listed on demand via the
         # get_trace tool.
-        return [
+        resources = [
             Resource(
                 uri="store://info",
                 name="clew store info",
@@ -266,9 +290,23 @@ def build_server() -> Server:
                 mimeType="application/json",
             )
         ]
+        try:
+            store, _, _ = _open(None)
+        except FileNotFoundError:
+            return resources
+        resources.extend(
+            Resource(
+                uri=f"trace://{trace_id}",
+                name=f"Clew trace {trace_id[:12]}",
+                description="Finalized Clew trace as JSON.",
+                mimeType="application/json",
+            )
+            for trace_id in store.iter_traces()
+        )
+        return resources
 
-    @server.read_resource()
-    async def read_resource(uri: object) -> str:
+    @server.read_resource()  # type: ignore[untyped-decorator,no-untyped-call]
+    async def read_resource(uri: object) -> list[ReadResourceContents]:
         # The MCP type stub declares ``uri: str``, but the underlying
         # transport passes an ``AnyUrl`` instance (a pydantic wrapper).
         # Coerce to a plain str first so the comparison and
@@ -278,13 +316,14 @@ def build_server() -> Server:
             try:
                 _, ts, root = _open(None)
             except FileNotFoundError as exc:
-                return json.dumps({"error": str(exc)})
+                payload = json.dumps({"error": str(exc)})
+                return [ReadResourceContents(payload, "application/json")]
             bm = BranchManager(ts)
             head = bm.head_span_id() if (root / "HEAD").exists() else None
             branches = [b.name for b in bm.list()]
-            return json.dumps(
+            payload = json.dumps(
                 {
-                    "version": 1,
+                    "version": STORE_VERSION,
                     "root": str(root),
                     "head": head,
                     "branches": branches,
@@ -293,14 +332,16 @@ def build_server() -> Server:
                 default=str,
                 indent=2,
             )
+            return [ReadResourceContents(payload, "application/json")]
         if uri.startswith("trace://"):
             tid = uri[len("trace://") :]
             try:
                 _, ts, _ = _open(None)
                 trace = ts.get_trace(tid)
             except (KeyError, FileNotFoundError) as exc:
-                return json.dumps({"error": str(exc)})
-            return json.dumps(
+                payload = json.dumps({"error": str(exc)})
+                return [ReadResourceContents(payload, "application/json")]
+            payload = json.dumps(
                 {
                     "trace_id": trace.trace_id,
                     "root_span_id": trace.root_span_id,
@@ -309,9 +350,11 @@ def build_server() -> Server:
                 default=str,
                 indent=2,
             )
-        return json.dumps({"error": f"unknown resource: {uri}"})
+            return [ReadResourceContents(payload, "application/json")]
+        payload = json.dumps({"error": f"unknown resource: {uri}"})
+        return [ReadResourceContents(payload, "application/json")]
 
-    @server.call_tool()
+    @server.call_tool()  # type: ignore[untyped-decorator]
     async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         try:
             if name == "list_traces":
@@ -331,11 +374,7 @@ def build_server() -> Server:
                             "trace_id": tid,
                             "root_span_id": trace.root_span_id,
                             "span_count": len(trace.spans),
-                            "started_at": (
-                                root_span.started_at.isoformat()
-                                if root_span
-                                else None
-                            ),
+                            "started_at": (root_span.started_at.isoformat() if root_span else None),
                             "root_name": root_span.name if root_span else None,
                         }
                     )
@@ -363,14 +402,16 @@ def build_server() -> Server:
             if name == "get_span":
                 store, _, _ = _open(arguments.get("root"))
                 span = store.get(arguments["span_id"])
-                return [TextContent(type="text", text=json.dumps(_span_to_dict(span), default=str, indent=2))]
+                return [
+                    TextContent(
+                        type="text", text=json.dumps(_span_to_dict(span), default=str, indent=2)
+                    )
+                ]
 
             if name == "search":
                 _, ts, root = _open(arguments.get("root"))
                 type_enum = SpanType(arguments["type"]) if arguments.get("type") else None
-                status_enum = (
-                    SpanStatus(arguments["status"]) if arguments.get("status") else None
-                )
+                status_enum = SpanStatus(arguments["status"]) if arguments.get("status") else None
                 meta = arguments.get("metadata") or None
                 filt = QueryFilter(
                     name=arguments.get("name"),
@@ -406,7 +447,7 @@ def build_server() -> Server:
                 _, ts, _ = _open(arguments.get("root"))
                 bm = BranchManager(ts)
                 head_id = None
-                head = (ts.store.root / "HEAD")
+                head = ts.store.root / "HEAD"
                 if head.exists():
                     try:
                         head_id = bm.head_span_id()
@@ -473,11 +514,12 @@ def build_server() -> Server:
                 # ``execute`` is sync, so we run the replay loop
                 # ourselves — no need for a second event loop.
                 _, ts, _ = _open(arguments.get("root"))
-                trace = ts.get_trace(arguments["trace_id"])
                 arguments.get("executor", "mock")
                 executor = MockExecutor()
-                new_trace = ReplayEngine(ts, executor=executor)._replay_sync(
-                    trace.trace_id, executor=executor
+                new_trace = await ReplayEngine(ts, executor=executor).replay(
+                    arguments["trace_id"],
+                    from_span_id=arguments.get("from_span"),
+                    executor=executor,
                 )
                 new_trace_id = new_trace.trace_id
                 return [
@@ -511,14 +553,8 @@ def build_server() -> Server:
 
             if name == "query":
                 _, ts, root = _open(arguments.get("root"))
-                type_enum = (
-                    SpanType(arguments["type"]) if arguments.get("type") else None
-                )
-                status_enum = (
-                    SpanStatus(arguments["status"])
-                    if arguments.get("status")
-                    else None
-                )
+                type_enum = SpanType(arguments["type"]) if arguments.get("type") else None
+                status_enum = SpanStatus(arguments["status"]) if arguments.get("status") else None
                 meta = None
                 if arguments.get("metadata_specs"):
                     meta = parse_metadata_spec(arguments["metadata_specs"])

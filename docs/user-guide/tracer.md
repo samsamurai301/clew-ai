@@ -1,163 +1,66 @@
-# SDK Reference
-
-The clew Python SDK is the user-facing tracing surface. The CLI is a
-thin shell over the SDK; most users will spend their time in code, not
-in a terminal.
-
-## Public API
+# Python tracer
 
 ```python
-from clew.sdk import (
-    Tracer,                # the main user-facing tracer
-    SpanType, SpanStatus,  # span enums
-    Span, Trace,           # data models
-    current_span,          # task-local span context helpers
-    current_trace_id,
-    OTelBridge,            # OTel format converter
-    instrument_openai,     # monkey-patch helpers
-    instrument_anthropic,
-)
+from clew.sdk import SpanStatus, SpanType, Tracer
 ```
 
-## The `Tracer` class
+`@tracer.agent` starts one independently identified trace. `@tracer.span(...)` records a
+nested sync, async, generator, or async-generator call. `tracer.trace(...)` records a manual
+block.
 
 ```python
-class Tracer:
-    def __init__(
-        self,
-        store: TraceStore | None = None,
-        name: str = "default",
-        cwd: Path | None = None,
-    ) -> None: ...
+from pathlib import Path
 
-    @property
-    def store(self) -> TraceStore: ...
+from clew.sdk import SpanType, Tracer
 
-    def agent(self, fn): ...          # decorator: marks the trace entry
-    def span(self, name, type=...):   # decorator factory: marks a child span
-    def trace(self, name, type=...):  # context manager: manual span
+tracer = Tracer(cwd=Path.cwd())
+
+@tracer.agent
+async def run(question: str) -> str:
+    return await retrieve(question)
+
+@tracer.span("retrieve", type=SpanType.TOOL)
+async def retrieve(question: str) -> str:
+    return f"result for {question}"
 ```
 
-### `@t.agent`
+The agent root and every child have separate UUID4 occurrence IDs. The trace has its own
+UUID4 `trace_id`. Parentage is task-local through `ContextVar`, and `sequence` gives each
+occurrence deterministic order.
 
-Marks the *entry point* of a trace. The decorated function becomes
-the trace's root span. The trace id is the root span's id (content-addressed).
-
-```python
-@t.agent
-def run_agent(question: str) -> str:
-    ...
-```
-
-### `@t.span(name, type=SpanType.OBSERVATION)`
-
-Wraps a function (sync or async) as a child span. The parent is
-whichever span was active when the wrapped function was called.
+## Manual blocks
 
 ```python
-@t.span("search", type=SpanType.TOOL)
-def search_web(query: str) -> list[str]:
-    ...
-```
-
-### `with t.trace(...) as span:`
-
-Open a span as a context manager — useful when you want to record a
-block of code without decorating a function.
-
-```python
-with t.trace("my-block", type=SpanType.TOOL) as span:
-    result = do_work()
-    span.set_attribute("k", "v")
+with tracer.trace("database", type=SpanType.TOOL) as span:
+    span.set_input({"query": "select ..."})
+    result = run_query()
+    span.set_attribute("db.system", "sqlite")
     span.set_output(result)
 ```
 
-## Span types
+An exception or cancellation finalizes an `ERROR` span and is re-raised. Public `Span`
+objects are immutable and terminal; in-flight mutable builders are internal.
 
-`SpanType` is a `StrEnum` with four values:
-
-- `LLM` — a chat-completion call
-- `TOOL` — a tool/function invocation
-- `DECISION` — an explicit branching point
-- `OBSERVATION` — anything else (default)
+## Replay SDK
 
 ```python
-from clew.sdk import SpanType
-SpanType.LLM        # → SpanType.LLM
-SpanType.TOOL       # → SpanType.TOOL
-```
-
-## OTel auto-instrumentation
-
-```python
-from openai import OpenAI
-from clew.sdk import instrument_openai
-
-client = OpenAI()
-instrument_openai(client)
-
-# Every chat.completions.create call now writes a span with
-# gen_ai.system="openai", gen_ai.request.model=..., etc.
-client.chat.completions.create(model="gpt-4o", messages=[...])
-```
-
-`instrument_anthropic` works the same way for the Anthropic SDK.
-Both helpers are no-ops if the underlying library is not installed.
-
-## Context helpers
-
-```python
-from clew.sdk import current_span, current_trace_id
-
-current_span()      # the span currently in scope, or None
-current_trace_id()  # the trace id of the current span, or None
-```
-
-These are task-local: nested calls see the parent span, parallel
-tasks see their own copy.
-
-## Replay and diff
-
-Replay and diff are first-class SDK operations:
-
-```python
-import asyncio
 from clew.core.replay import ReplayEngine, RecordingExecutor
-from clew.core.diff import diff, format_text
+from clew.sdk import ReplayContext, ReplayResult, Span
 
-t = Tracer()
+async def execute(span: Span, context: ReplayContext) -> ReplayResult:
+    return ReplayResult(output={"replayed": span.name})
 
-# Record a trace.
-@t.agent
-def run():
-    @t.span("answer")
-    def a(): return "hi"
-    return a()
-run()
-
-trace_ids = list(t.store.store.iter_traces())
-trace_id = trace_ids[0]
-
-# Replay under a different "model" by providing a custom executor.
-async def fn(span, ctx):
-    return ("replayed-" + (span.output or "")), {"replay.model": "gpt-4o-mini"}
-
-engine = ReplayEngine(t.store, executor=RecordingExecutor(fn))
-new_trace = asyncio.run(engine.replay(trace_id))
-
-# Diff.
-a = t.store.get_trace(trace_id)
-b = t.store.get_trace(new_trace.trace_id)
-print(format_text(diff(a, b)))
+engine = ReplayEngine(tracer.store, executor=RecordingExecutor(execute))
+new_trace = await engine.replay(source_trace_id, from_span_id=source_span_id)
 ```
 
-## Branching
+The executor supplies payload changes only. The engine owns destination identity, parents,
+sequence, timestamps, terminal status, and integrity hash.
 
-```python
-from clew.core.branch import BranchManager
+## Provider wrappers
 
-bm = BranchManager(t.store)
-trace = t.store.get_trace(trace_id)
-bm.create("experiment", trace.root_span_id)
-bm.checkout("experiment")
-```
+`instrument_openai` and `instrument_anthropic` support sync and async clients and retain
+the currently active Clew parent. Install their named extras before importing the provider
+SDK. Repeated instrumentation is idempotent for the same tracer; a different explicit
+tracer is rejected so the destination store is never ambiguous. See
+[OpenAI / Anthropic](../integrations/llm-sdks.md).

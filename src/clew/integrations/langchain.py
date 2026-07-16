@@ -16,14 +16,20 @@ accepts a `callbacks` argument:
 
 from __future__ import annotations
 
+import threading
 from typing import Any
 from uuid import UUID
+
+try:
+    from langchain_core.callbacks import BaseCallbackHandler
+except ImportError as exc:  # pragma: no cover - exercised in minimal-install smoke test
+    raise ImportError("LangChain support requires `clew-ai[langchain]`.") from exc
 
 from clew.core.models import SpanType
 from clew.sdk.tracer import Tracer
 
 
-class ClewCallbackHandler:
+class ClewCallbackHandler(BaseCallbackHandler):
     """Bridge between LangChain's callback system and clew spans.
 
     Implements the subset of
@@ -48,11 +54,10 @@ class ClewCallbackHandler:
 
     def __init__(self, tracer: Tracer) -> None:
         """Construct a callback handler bound to ``tracer``."""
+        super().__init__()
         self._tracer = tracer
-        # run_id -> span id (we maintain our own mapping)
-        self._spans: dict[str, str] = {}
-        # run_id -> parent_run_id
-        self._parents: dict[str, str | None] = {}
+        self._spans: dict[str, Any] = {}
+        self._lock = threading.RLock()
 
     # -- helpers ---------------------------------------------------------
 
@@ -72,19 +77,37 @@ class ClewCallbackHandler:
             return str(serialized["name"])
         return default
 
-    def _open(self, run_id: UUID, parent_run_id: UUID | None, name: str, type: SpanType) -> None:
+    def _open(
+        self,
+        run_id: UUID,
+        parent_run_id: UUID | None,
+        name: str,
+        type: SpanType,
+        input: Any,
+    ) -> None:
         """Open a span and store it keyed by run_id."""
-        self._parents[str(run_id)] = str(parent_run_id) if parent_run_id else None
-        span = self._tracer._begin(name=name, type=type)
-        self._spans[str(run_id)] = span.id
+        with self._lock:
+            parent = self._spans.get(str(parent_run_id)) if parent_run_id else None
+            span = self._tracer._begin(
+                name=name,
+                type=type,
+                input=input,
+                parent=parent,
+                activate_context=False,
+                attributes={
+                    "langchain.run_id": str(run_id),
+                    "langchain.parent_run_id": (str(parent_run_id) if parent_run_id else None),
+                },
+            )
+            self._spans[str(run_id)] = span
 
     def _close(self, run_id: UUID, output: Any = None, error: BaseException | None = None) -> None:
         """Close a span and pop it from the active stack."""
-        sid = self._spans.pop(str(run_id), None)
-        if sid is None:
+        with self._lock:
+            span = self._spans.pop(str(run_id), None)
+        if span is None:
             return
-        self._parents.pop(str(run_id), None)
-        self._tracer._end(sid, output=output, error=error)
+        self._tracer._end(span.id, output=output, error=error)
 
     # -- chain events ----------------------------------------------------
 
@@ -102,6 +125,7 @@ class ClewCallbackHandler:
             parent_run_id,
             self._name(serialized, "chain"),
             SpanType.OBSERVATION,
+            inputs,
         )
 
     def on_chain_end(
@@ -138,6 +162,7 @@ class ClewCallbackHandler:
             parent_run_id,
             self._name(serialized, "llm"),
             SpanType.LLM,
+            prompts,
         )
 
     def on_llm_end(
@@ -179,6 +204,7 @@ class ClewCallbackHandler:
             parent_run_id,
             self._name(serialized, "tool"),
             SpanType.TOOL,
+            input_str,
         )
 
     def on_tool_end(

@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>clew trace 7115fb9839114235</title>
+<title>clew trace 232e3e38118945c8</title>
 <style>
 :root {
   --bg: #0d1117;
@@ -109,7 +109,7 @@ ul.tree { padding-left: 0; }
   transition: border-color 0.1s;
 }
 .span.error { border-color: var(--error); }
-.span.running { border-color: var(--warning); }
+.span.skipped { border-color: var(--warning); }
 .span-head {
   display: flex; gap: 8px; align-items: center;
   padding: 8px 12px; cursor: pointer; user-select: none;
@@ -132,7 +132,7 @@ ul.tree { padding-left: 0; }
 }
 .status-ok { color: var(--ok); font-size: 0.78em; }
 .status-error { color: var(--error); font-size: 0.78em; font-weight: 600; }
-.status-running { color: var(--warning); font-size: 0.78em; }
+.status-skipped { color: var(--warning); font-size: 0.78em; }
 .id { color: var(--muted); font-size: 0.72em;
       font-family: ui-monospace, monospace; margin-left: auto; }
 .duration { color: var(--muted); font-size: 0.78em; }
@@ -169,30 +169,30 @@ footer a { color: var(--accent-2); }
 <body>
 <div class="container">
   <header>
-    <h1>clew trace <span class="id">7115fb9839114235</span></h1>
-    <span class="pill">5 spans · 1 error</span>
+    <h1>clew trace <span class="id">232e3e38118945c8</span></h1>
+    <span class="pill">3 spans · 0 errors</span>
   </header>
   <p class="meta">
-    root: <code>bd3cf87f51b641fe</code> · depth: <strong>4</strong> ·
-    duration: <strong>500ms</strong> · started: 2024-01-01T12:00:00+00:00
+    root: <code>88a88f5d4cd8411e</code> · depth: <strong>2</strong> ·
+    duration: <strong>0ms</strong> · started: 2026-07-15T03:13:46.402038+00:00
   </p>
 
   <div class="stats">
     <div class="stat">
       <div class="label">Spans</div>
-      <div class="value">5</div>
+      <div class="value">3</div>
     </div>
-    <div class="stat error">
+    <div class="stat ok">
       <div class="label">Errors</div>
-      <div class="value">1</div>
+      <div class="value">0</div>
     </div>
     <div class="stat accent">
       <div class="label">Max depth</div>
-      <div class="value">4</div>
+      <div class="value">2</div>
     </div>
     <div class="stat">
       <div class="label">Total time</div>
-      <div class="value">500ms</div>
+      <div class="value">0ms</div>
     </div>
   </div>
 
@@ -204,85 +204,66 @@ footer a { color: var(--accent-2); }
 
   <ul class="tree">
 <li><div class="span">
-<div class="span-head"><span class="caret">▶</span><span class="name">research_agent</span><span class="type">OBSERVATION</span><span class="status-ok">OK</span><span class="duration">100.0ms</span><span class="id">bd3cf87f51b6</span></div>
+<div class="span-head"><span class="caret">▶</span><span class="name">demo_agent</span><span class="type">OBSERVATION</span><span class="status-ok">OK</span><span class="duration">0.0ms</span><span class="id">88a88f5d4cd8</span></div>
 <div class="details">
-<div class="label">id</div><pre>bd3cf87f51b641febef36c5edf78f1d3</pre>
-<div class="label">attributes</div><pre>{
-  &quot;question&quot;: &quot;what is clew?&quot;
-}</pre>
+<div class="label">id</div><pre>88a88f5d4cd8411ebfd88e98c897dbca</pre>
 <div class="label">input</div><pre>{
-  &quot;q&quot;: &quot;what is clew?&quot;
+  &quot;args&quot;: [
+    &quot;Will I need an umbrella?&quot;
+  ],
+  &quot;kwargs&quot;: {}
 }</pre>
-<div class="label">output</div><pre>clew is git for AI reasoning.</pre>
+<div class="label">output</div><pre>{
+  &quot;answer&quot;: {
+    &quot;city&quot;: &quot;Berlin&quot;,
+    &quot;forecast&quot;: &quot;light rain&quot;,
+    &quot;offline&quot;: true
+  },
+  &quot;question&quot;: &quot;Will I need an umbrella?&quot;,
+  &quot;route&quot;: &quot;weather-tool&quot;
+}</pre>
 </div></div>
 <ul>
 <li><div class="span">
-<div class="span-head"><span class="caret">▶</span><span class="name">plan</span><span class="type">LLM</span><span class="status-ok">OK</span><span class="duration">100.0ms</span><span class="id">974b1ceaffc4</span></div>
+<div class="span-head"><span class="caret">▶</span><span class="name">choose-route</span><span class="type">DECISION</span><span class="status-ok">OK</span><span class="duration">0.0ms</span><span class="id">504ee944d359</span></div>
 <div class="details">
-<div class="label">id</div><pre>974b1ceaffc44ce295c3ed760f19dbfe</pre>
-<div class="label">parent_ids</div><pre>bd3cf87f51b641febef36c5edf78f1d3</pre>
-<div class="label">attributes</div><pre>{
-  &quot;model&quot;: &quot;gpt-4o&quot;,
-  &quot;temperature&quot;: 0.7
-}</pre>
+<div class="label">id</div><pre>504ee944d35943059fab2adaf295bd79</pre>
+<div class="label">parent_ids</div><pre>88a88f5d4cd8411ebfd88e98c897dbca</pre>
 <div class="label">input</div><pre>{
-  &quot;messages&quot;: &quot;plan: what is clew?&quot;
+  &quot;args&quot;: [],
+  &quot;kwargs&quot;: {}
 }</pre>
-<div class="label">output</div><pre>1. Define clew
-2. Compare to git
-3. Summarize</pre>
+<div class="label">output</div><pre>weather-tool</pre>
 </div></div>
-<ul>
+</li>
 <li><div class="span">
-<div class="span-head"><span class="caret">▶</span><span class="name">web_search</span><span class="type">TOOL</span><span class="status-ok">OK</span><span class="duration">100.0ms</span><span class="id">6f3c26024eb5</span></div>
+<div class="span-head"><span class="caret">▶</span><span class="name">weather-tool</span><span class="type">TOOL</span><span class="status-ok">OK</span><span class="duration">0.0ms</span><span class="id">0a5152992b0c</span></div>
 <div class="details">
-<div class="label">id</div><pre>6f3c26024eb54fd9a522ec3c7f960c8d</pre>
-<div class="label">parent_ids</div><pre>974b1ceaffc44ce295c3ed760f19dbfe</pre>
+<div class="label">id</div><pre>0a5152992b0c4b9e992a166064f43c37</pre>
+<div class="label">parent_ids</div><pre>88a88f5d4cd8411ebfd88e98c897dbca</pre>
 <div class="label">attributes</div><pre>{
-  &quot;tool_name&quot;: &quot;web_search&quot;
+  &quot;demo.repaired&quot;: true,
+  &quot;error.message&quot;: &quot;demo API key is intentionally missing&quot;,
+  &quot;error.type&quot;: &quot;RuntimeError&quot;
 }</pre>
 <div class="label">input</div><pre>{
-  &quot;q&quot;: &quot;clew reasoning&quot;
+  &quot;args&quot;: [],
+  &quot;kwargs&quot;: {}
 }</pre>
-<div class="label">output</div><pre>3 results</pre>
-</div></div>
-<ul>
-<li><div class="span error">
-<div class="span-head"><span class="caret">▶</span><span class="name">fetch</span><span class="type">TOOL</span><span class="status-error">ERROR</span><span class="duration">100.0ms</span><span class="id">d01a7b422093</span></div>
-<div class="details">
-<div class="label">id</div><pre>d01a7b422093402699feeca010623720</pre>
-<div class="label">parent_ids</div><pre>6f3c26024eb54fd9a522ec3c7f960c8d</pre>
-<div class="label">error</div><pre>HTTP 503: Service Unavailable</pre>
-<div class="label">attributes</div><pre>{
-  &quot;tool_name&quot;: &quot;http_get&quot;,
-  &quot;url&quot;: &quot;https://clew.dev&quot;
-}</pre>
-<div class="label">input</div><pre>{
-  &quot;url&quot;: &quot;https://clew.dev&quot;
+<div class="label">output</div><pre>{
+  &quot;city&quot;: &quot;Berlin&quot;,
+  &quot;forecast&quot;: &quot;light rain&quot;,
+  &quot;offline&quot;: true
 }</pre>
 </div></div>
+</li>
 </ul>
-<li><div class="span">
-<div class="span-head"><span class="caret">▶</span><span class="name">answer</span><span class="type">LLM</span><span class="status-ok">OK</span><span class="duration">100.0ms</span><span class="id">4d2a91d1a6b4</span></div>
-<div class="details">
-<div class="label">id</div><pre>4d2a91d1a6b447ccb10ac467240c332a</pre>
-<div class="label">parent_ids</div><pre>974b1ceaffc44ce295c3ed760f19dbfe</pre>
-<div class="label">attributes</div><pre>{
-  &quot;model&quot;: &quot;gpt-4o&quot;,
-  &quot;temperature&quot;: 0.3
-}</pre>
-<div class="label">input</div><pre>{
-  &quot;messages&quot;: &quot;synthesize&quot;
-}</pre>
-<div class="label">output</div><pre>clew is a local-first debugger for AI agent reasoning traces.</pre>
-</div></div>
-</ul>
-</ul>
+</li>
   </ul>
 
   <footer>
-    <span>Generated by <a href="https://github.com/clew/clew">clew</a></span>
-    <span class="id">2026-07-13T22:19:07.661620+00:00</span>
+    <span>Generated by <a href="https://github.com/samsamurai301/clew-ai">Clew</a></span>
+    <span class="id">2026-07-15T03:13:46.410426+00:00</span>
   </footer>
 </div>
 <script>
